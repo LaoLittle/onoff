@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "onoff",
+    "onoff-horizon"
+]
+
+[workspace.dependencies]
+zip = "0.6.6"
