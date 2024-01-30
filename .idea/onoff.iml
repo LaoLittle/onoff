@@ -5,6 +5,8 @@
       <sourceFolder url="file://$MODULE_DIR$/onoff-horizon/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/onoff/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/onoff-core/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/onoff-vfs/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/onoff/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />
       <excludeFolder url="file://$MODULE_DIR$/test-resources" />

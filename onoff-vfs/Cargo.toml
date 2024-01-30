@@ -1,0 +1,15 @@
+[package]
+name = "onoff-vfs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+onoff-core.workspace = true
+aes.workspace = true
+xts-mode.workspace = true
+ctr.workspace = true
+smallvec.workspace = true
+vfs.workspace = true
+bitflags.workspace = true
+lz4_flex.workspace = true
+bytes.workspace = true

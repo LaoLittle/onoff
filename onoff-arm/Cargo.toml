@@ -1,7 +1,7 @@
 [package]
-name = "onoff-horizon"
+name = "onoff-arm"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-sharded-slab.workspace = true
+onoff-core.workspace = true
