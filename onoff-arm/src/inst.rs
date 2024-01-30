@@ -3,20 +3,10 @@ use std::io::Read;
 
 #[derive(Debug, Copy, Clone)]
 pub enum Inst {
-    B {
-        label: i64
-    },
-    Bl {
-        label: i64
-    },
-    Adr {
-        rd: u8,
-        label: i64
-    },
-    Adrp {
-        rd: u8,
-        label: i64
-    }
+    B { label: i64 },
+    Bl { label: i64 },
+    Adr { rd: u8, label: i64 },
+    Adrp { rd: u8, label: i64 },
 }
 
 pub struct InstDecoder<R> {
@@ -44,7 +34,7 @@ impl<R: Read> InstDecoder<R> {
     }
 }
 
-impl<R:Read> IntoIterator for InstDecoder<R> {
+impl<R: Read> IntoIterator for InstDecoder<R> {
     type Item = Inst;
     type IntoIter = IntoIter<R>;
 
@@ -55,7 +45,7 @@ impl<R:Read> IntoIterator for InstDecoder<R> {
 }
 
 pub struct IntoIter<R> {
-    decoder: InstDecoder<R>
+    decoder: InstDecoder<R>,
 }
 
 impl<R> IntoIter<R> {
@@ -94,7 +84,7 @@ fn decode_dp_imm(inst: u32) -> Result<Inst> {
     match op0 {
         0b000 | 0b001 => decode_pc_rel(inst),
 
-        _ => Err(Error::NotSupported)
+        _ => Err(Error::NotSupported),
     }
 }
 
@@ -107,13 +97,10 @@ fn decode_pc_rel(inst: u32) -> Result<Inst> {
     let imm = sign_extend_64::<21>((immhi << 2) | immlo);
 
     let inst = match op {
-        0 => Inst::Adr {
-            rd,
-            label: imm
-        },
+        0 => Inst::Adr { rd, label: imm },
         1 => Inst::Adrp {
             rd,
-            label: imm * 4096
+            label: imm * 4096,
         },
         _ => unreachable!(),
     };
@@ -130,7 +117,7 @@ fn decode_bes(inst: u32) -> Result<Inst> {
     }
 }
 
-fn decode_ubr_imm(inst: u32) -> Result<Inst>  {
+fn decode_ubr_imm(inst: u32) -> Result<Inst> {
     let op = extract_field::<32, 31>(inst);
     let imm26 = extract_field::<26, 0>(inst);
     let imm = sign_extend_64::<26>(imm26);
@@ -139,7 +126,7 @@ fn decode_ubr_imm(inst: u32) -> Result<Inst>  {
     Ok(match op {
         0 => Inst::B { label },
         1 => Inst::Bl { label },
-        _ => unreachable!()
+        _ => unreachable!(),
     })
 }
 
@@ -169,10 +156,12 @@ mod tests {
 
     #[test]
     fn decode() {
-        let inst = [0x7e, 0x05, 0x00, 0x14, 0x05, 0x03, 0x00, 0xd0, 0x46, 0x14, 0x00, 0xf0, 0x00, 0x00, 0x00, 0x90, 0x00, 0x00, 0x00, 0xb0];
+        let inst = [
+            0x7e, 0x05, 0x00, 0x14, 0x05, 0x03, 0x00, 0xd0, 0x46, 0x14, 0x00, 0xf0, 0x00, 0x00,
+            0x00, 0x90, 0x00, 0x00, 0x00, 0xb0,
+        ];
 
         let mut decoder = InstDecoder::new(inst.as_slice());
-
 
         while let Ok(inst) = decoder.decode_inst() {
             println!("{:?}", inst);

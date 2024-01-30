@@ -1,19 +1,20 @@
 use crate::inst::{Inst, InstDecoder};
-use crate::mem::{Memory, PAGE_SIZE, PageMemory};
+use crate::mem::{Memory, PageMemory};
 use onoff_core::error::Result;
 
 #[derive(Debug)]
 pub struct Cpu {
     context: CpuContext,
-    memory: PageMemory
+    memory: PageMemory,
 }
 
 pub enum Break {
     Svc,
-    Eof
+    Eof,
 }
 
 impl Cpu {
+    #[inline]
     pub fn new() -> Self {
         Self {
             context: CpuContext::new(),
@@ -21,20 +22,16 @@ impl Cpu {
         }
     }
 
-    pub fn execute(&mut self, addr: Option<u64>, steps: u32) -> Result<Option<Break>> {
-        if let Some(addr) = addr {
-            *self.context.pc_mut() = addr;
-        }
-
+    pub fn execute(&mut self, steps: u32) -> Result<Option<Break>> {
         for _ in 0..steps {
-            let pc = self.context.pc();
+            let pc = self.context.pc;
             let inst = self.memory.read32(pc)?;
             let bytes = inst.to_le_bytes();
             let mut decoder = InstDecoder::new(bytes.as_slice());
 
             match self.execute_single_inst(decoder.decode_inst()?) {
                 None => {}
-                Some(b) => return Ok(Some(b))
+                Some(b) => return Ok(Some(b)),
             }
         }
 
@@ -64,15 +61,22 @@ impl Cpu {
             }
         }
 
-        *self.context.pc_mut() += 4;
+        self.context.pc += 4;
 
         None
     }
 
+    #[inline]
     pub fn memory_mut(&mut self) -> &mut PageMemory {
         &mut self.memory
     }
 
+    #[inline]
+    pub fn set_pc(&mut self, base: u64) {
+        self.context.pc = base;
+    }
+
+    #[inline]
     pub fn context(&self) -> &CpuContext {
         &self.context
     }
@@ -90,7 +94,7 @@ impl CpuContext {
     pub fn new() -> Self {
         Self {
             gprs: [0; 32],
-            pc: 0
+            pc: 0,
         }
     }
 
@@ -133,9 +137,7 @@ impl CpuContext {
 
 #[cfg(test)]
 mod tests {
-    use crate::context::{Break, Cpu};
-    use crate::inst::InstDecoder;
-    use crate::mem::Memory;
+    use crate::context::Cpu;
 
     #[test]
     fn execute() {
@@ -145,7 +147,8 @@ mod tests {
 
         cpu.memory_mut().write_exact(&inst, 0).unwrap();
 
-        cpu.execute(Some(0), 2).unwrap();
+        cpu.set_pc(0);
+        cpu.execute(2).unwrap();
 
         println!("{:#?}", cpu);
     }
