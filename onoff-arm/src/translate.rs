@@ -14,6 +14,8 @@ pub struct Translator {
     debug: bool,
 }
 
+pub type BlockAbi = unsafe extern "C" fn(*mut CpuContext) -> u64;
+
 impl Translator {
     pub fn new() -> Result<Self> {
         let mut flag_builder = settings::builder();
@@ -30,6 +32,7 @@ impl Translator {
 
         let mut signature = module.make_signature();
         signature.params.push(AbiParam::new(types::R64));
+        signature.returns.push(AbiParam::new(types::I64));
 
         Ok(Self {
             module,
@@ -51,7 +54,7 @@ impl Translator {
     /// ```c
     /// void bb(context*);
     /// ```
-    pub fn translate(&mut self, insts: &[ArmInst]) -> unsafe extern "C" fn(*mut CpuContext) {
+    pub fn translate(&mut self, insts: &[ArmInst]) -> BlockAbi {
         let name = self.update_counter();
         let sig = self.signature.clone();
         let block = self
@@ -81,6 +84,26 @@ impl Translator {
             let mut pc_add = 0;
             for inst in insts {
                 match inst {
+                    ArmInst::Adr { rd, label } => {
+                        let pc = saver.load_pc(&mut bcx, pc_add);
+                        let val = bcx.ins().iadd_imm(pc, *label);
+                        saver.store_register(*rd, &mut bcx, val);
+                    }
+                    ArmInst::Adrp { rd, label } => {
+                        let pc = saver.load_pc(&mut bcx, pc_add);
+                        let hi = bcx.ins().band_imm(pc, !4095);
+                        let val = bcx.ins().iadd_imm(hi, *label);
+                        saver.store_register(*rd, &mut bcx, val);
+                    }
+                    ArmInst::Ret { rn } => {
+                        let dest = saver.load_register(*rn, &mut bcx);
+
+                        saver.store_pc(&mut bcx, dest);
+
+                        save_pc = false;
+
+                        break;
+                    }
                     ArmInst::B { label } => {
                         let pc = saver.load_pc(&mut bcx, pc_add);
                         let dest = bcx.ins().iadd_imm(pc, *label);
@@ -102,26 +125,6 @@ impl Translator {
 
                         break;
                     }
-                    ArmInst::Adr { rd, label } => {
-                        let pc = saver.load_pc(&mut bcx, pc_add);
-                        let val = bcx.ins().iadd_imm(pc, *label);
-                        saver.store_register(*rd, &mut bcx, val);
-                    }
-                    ArmInst::Adrp { rd, label } => {
-                        let pc = saver.load_pc(&mut bcx, pc_add);
-                        let hi = bcx.ins().band_imm(pc, !4095);
-                        let val = bcx.ins().iadd_imm(hi, *label);
-                        saver.store_register(*rd, &mut bcx, val);
-                    }
-                    ArmInst::Ret { rn } => {
-                        let dest = saver.load_register(*rn, &mut bcx);
-
-                        saver.store_pc(&mut bcx, dest);
-
-                        save_pc = false;
-
-                        break;
-                    }
                 }
 
                 pc_add += 4;
@@ -134,7 +137,8 @@ impl Translator {
 
             saver.save_registers(&mut bcx);
 
-            bcx.ins().return_(&[]);
+            let ret = bcx.ins().iconst(types::I64, 0);
+            bcx.ins().return_(&[ret]);
             bcx.seal_all_blocks();
             bcx.finalize();
         }
@@ -152,7 +156,7 @@ impl Translator {
         let ptr = self.module.get_finalized_function(block);
 
         // Safety: we do know the function is well-defined
-        unsafe { core::mem::transmute(ptr) }
+        unsafe { core::mem::transmute::<_, BlockAbi>(ptr) }
     }
 
     #[inline]
@@ -166,6 +170,8 @@ struct RegisterSaver {
     pc: bool,
     cpu_ctx: Value,
 }
+
+const PC_VAR: u32 = 100;
 
 impl RegisterSaver {
     pub fn new(cpu_ctx: Value) -> Self {
@@ -202,7 +208,7 @@ impl RegisterSaver {
     }
 
     pub fn load_pc(&mut self, bcx: &mut FunctionBuilder, add: i64) -> Value {
-        let var = Variable::from_u32(100);
+        let var = Variable::from_u32(PC_VAR);
         if !self.pc {
             bcx.declare_var(var, types::I64);
             let pc = get_pc(bcx, self.cpu_ctx);
@@ -216,7 +222,7 @@ impl RegisterSaver {
     }
 
     pub fn store_pc(&mut self, bcx: &mut FunctionBuilder, val: Value) {
-        let var = Variable::from_u32(100);
+        let var = Variable::from_u32(PC_VAR);
         if !self.pc {
             bcx.declare_var(var, types::I64);
         }
@@ -237,7 +243,7 @@ impl RegisterSaver {
         }
 
         if self.pc {
-            let pc = bcx.use_var(Variable::from_u32(100));
+            let pc = bcx.use_var(Variable::from_u32(PC_VAR));
             set_pc(bcx, self.cpu_ctx, pc);
         }
     }

@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+use std::fmt::{Debug, Formatter};
+use smallvec::SmallVec;
 use crate::inst::{Inst, InstDecoder};
 use crate::mem::{Memory, PageMemory};
 use onoff_core::error::Result;
+use crate::translate::{BlockAbi, Translator};
 
-#[derive(Debug)]
 pub struct Cpu {
     context: CpuContext,
     memory: PageMemory,
+    translator: Translator,
+    code_cache: HashMap<u64, BlockAbi>,
 }
 
 pub enum Break {
@@ -19,9 +24,47 @@ impl Cpu {
         Self {
             context: CpuContext::new(),
             memory: PageMemory::new(),
+            translator: Translator::new().unwrap(),
+            code_cache: HashMap::new()
         }
     }
 
+    /// S: Steps
+    pub fn execute<const S: usize>(&mut self) -> Result<Option<Break>> {
+        assert!(S < 64, "too many steps!");
+
+        let pc = self.context.pc();
+
+        if let Some(&cache) = self.code_cache.get(&pc) {
+            unsafe { cache(&mut self.context); }
+
+            return Ok(None);
+        }
+
+        let mut v = SmallVec::<Inst, S>::new();
+        for i in 0..S {
+            let Ok(mem) = self.memory.read32(pc + i as u64 * 4) else {
+                break;
+            };
+
+            let mem = mem.to_le_bytes();
+
+            let mut decoder = InstDecoder::new(mem.as_slice());
+            let inst = decoder.decode_inst()?;
+
+            v.push(inst);
+        }
+
+        let block = self.translator.translate(&v);
+
+        unsafe { block(&mut self.context); }
+
+        self.code_cache.insert(pc, block);
+
+        Ok(None)
+    }
+
+    /*
     pub fn execute(&mut self, steps: u32) -> Result<Option<Break>> {
         for _ in 0..steps {
             let pc = self.context.pc;
@@ -38,7 +81,9 @@ impl Cpu {
         Ok(None)
     }
 
-    pub fn execute_single_inst(&mut self, inst: Inst) -> Option<Break> {
+     */
+
+    /*pub fn execute_single_inst(&mut self, inst: Inst) -> Option<Break> {
         match inst {
             Inst::B { label } => {
                 let pc = self.context.pc_mut();
@@ -59,7 +104,7 @@ impl Cpu {
                 let rd = self.context.gpr_mut(rd);
                 *rd = (pc & !4095).wrapping_add_signed(label);
             }
-            _ => todo!(),
+            _ => {},
         }
 
         self.context.pc += 4;
@@ -67,9 +112,24 @@ impl Cpu {
         None
     }
 
+     */
+
     #[inline]
     pub fn memory_mut(&mut self) -> &mut PageMemory {
         &mut self.memory
+    }
+
+    pub fn check_cache(&mut self, addr: u64) {
+        let mut addrs = SmallVec::<u64, 16>::new();
+        for (&base, _) in self.code_cache.iter() {
+            if (base..base + 64 * 4).contains(&addr) {
+                addrs.push(base);
+            }
+        }
+
+        for addr in addrs {
+            self.code_cache.remove(&addr);
+        }
     }
 
     #[inline]
@@ -80,6 +140,14 @@ impl Cpu {
     #[inline]
     pub fn context(&self) -> &CpuContext {
         &self.context
+    }
+}
+
+impl Debug for Cpu {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cpu")
+            .field("context", &self.context)
+            .finish()
     }
 }
 
@@ -146,15 +214,20 @@ mod tests {
 
     #[test]
     fn execute() {
-        let inst = [0x01, 0x00, 0x00, 0x14, 0x60, 0x00, 0x00, 0x10];
+        // Adr { rd: 0, label: 12 }
+        // B { label: 4 }
+        let inst = [0x60, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x14];
 
         let mut cpu = Cpu::new();
 
-        cpu.memory_mut().write_exact(&inst, 0).unwrap();
+        cpu.memory_mut().write_exact(&inst, 0x10000).unwrap();
 
-        cpu.set_pc(0);
-        cpu.execute(2).unwrap();
+        cpu.set_pc(0x10000);
+        cpu.execute::<2>().unwrap();
 
-        println!("{:#?}", cpu);
+        println!("{:?}", cpu);
+
+        assert_eq!(cpu.context().gprs[0], 0x10000 + 12);
+        assert_eq!(cpu.context().pc(), 0x10000 + 4 + 4);
     }
 }

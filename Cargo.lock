@@ -512,6 +512,7 @@ dependencies = [
  "cranelift-native",
  "memoffset",
  "onoff-core",
+ "smallvec 2.0.0-alpha.3",
 ]
 
 [[package]]

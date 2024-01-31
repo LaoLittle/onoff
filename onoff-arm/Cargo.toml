@@ -8,6 +8,8 @@ onoff-core.workspace = true
 
 memoffset.workspace = true
 
+smallvec.workspace = true
+
 # jit
 cranelift.workspace = true
 cranelift-native.workspace = true
