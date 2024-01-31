@@ -7,6 +7,7 @@ pub enum Inst {
     Bl { label: i64 },
     Adr { rd: u8, label: i64 },
     Adrp { rd: u8, label: i64 },
+    Ret { rn: u8 },
 }
 
 pub struct InstDecoder<R> {
@@ -78,6 +79,7 @@ fn decode_inst_u32(inst: u32) -> Result<Inst> {
     Ok(inst)
 }
 
+// Data process, immediate
 fn decode_dp_imm(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<26, 23>(inst);
 
@@ -108,16 +110,44 @@ fn decode_pc_rel(inst: u32) -> Result<Inst> {
     Ok(inst)
 }
 
-fn decode_bes(inst: u32) -> Result<Inst> {
-    let op0 = extract_field::<31, 29>(inst);
+// Branch, Exception Generating and System
+const fn decode_bes(inst: u32) -> Result<Inst> {
+    let op0 = extract_field::<32, 29>(inst);
+    let op1 = extract_field::<26, 12>(inst);
+    let op2 = extract_field::<5, 0>(inst);
 
-    match op0 {
-        0b000 | 0b100 => decode_ubr_imm(inst),
+    let op1_sign = extract_field::<26, 25>(inst);
+
+    match (op0, op1) {
+        (0b110, 0b01000000110010) if op2 == 0b11111 => todo!(),
+        (0b110, _) if op1_sign == 0b1 => decode_ubr_reg(inst),
+        (0b000 | 0b100, _) => decode_ubr_imm(inst),
         _ => Err(Error::NotSupported),
     }
 }
 
-fn decode_ubr_imm(inst: u32) -> Result<Inst> {
+// Unconditioned branch, register
+const fn decode_ubr_reg(inst: u32) -> Result<Inst> {
+    let opc = extract_field::<25, 21>(inst);
+    let op2 = extract_field::<21, 16>(inst);
+    let op3 = extract_field::<16, 10>(inst);
+    let rn = extract_field::<10, 5>(inst);
+    let op4 = extract_field::<5, 0>(inst);
+
+    match (opc, op3) {
+        (_, _) if op2 != 0b11111 => Err(Error::NotSupported),
+        (0b0000, 0b000000) if op4 == 0b00000 => todo!(), // BR
+        (0b0010, 0b000000) if op4 == 0b00000 => decode_ubr_reg_ret(rn), // RET
+        _ => Err(Error::NotSupported),
+    }
+}
+
+const fn decode_ubr_reg_ret(rn: u32) -> Result<Inst> {
+    Ok(Inst::Ret { rn: rn as u8 })
+}
+
+// Unconditioned branch, immediate
+const fn decode_ubr_imm(inst: u32) -> Result<Inst> {
     let op = extract_field::<32, 31>(inst);
     let imm26 = extract_field::<26, 0>(inst);
     let imm = sign_extend_64::<26>(imm26);
@@ -158,7 +188,7 @@ mod tests {
     fn decode() {
         let inst = [
             0x7e, 0x05, 0x00, 0x14, 0x05, 0x03, 0x00, 0xd0, 0x46, 0x14, 0x00, 0xf0, 0x00, 0x00,
-            0x00, 0x90, 0x00, 0x00, 0x00, 0xb0,
+            0x00, 0x90, 0x00, 0x00, 0x00, 0xb0, 0xc0, 0x03, 0x5f, 0xd6,
         ];
 
         let mut decoder = InstDecoder::new(inst.as_slice());

@@ -5,3 +5,11 @@ edition = "2021"
 
 [dependencies]
 onoff-core.workspace = true
+
+memoffset.workspace = true
+
+# jit
+cranelift.workspace = true
+cranelift-native.workspace = true
+cranelift-jit.workspace = true
+cranelift-module.workspace = true

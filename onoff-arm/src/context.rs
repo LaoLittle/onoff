@@ -59,6 +59,7 @@ impl Cpu {
                 let rd = self.context.gpr_mut(rd);
                 *rd = (pc & !4095).wrapping_add_signed(label);
             }
+            _ => todo!(),
         }
 
         self.context.pc += 4;
@@ -88,6 +89,10 @@ pub struct CpuContext {
     pub gprs: [u64; 32],
     pub pc: u64,
 }
+
+pub const REG_FP: u8 = 29;
+pub const REG_LR: u8 = 30;
+pub const REG_SP: u8 = 31;
 
 impl CpuContext {
     #[inline]

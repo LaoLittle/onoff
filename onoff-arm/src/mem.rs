@@ -402,12 +402,13 @@ mod tests {
 
     #[test]
     fn more_than_one_page() {
-        let buf = [1u8; 4097];
+        let buf = [1u8; 8193];
 
         let mut pm = PageMemory::new();
         pm.write_exact(&buf, 0).unwrap();
 
         assert!(matches!(pm.read8(0), Ok(1)));
         assert!(matches!(pm.read8(4096), Ok(1)));
+        assert!(matches!(pm.read8(8192), Ok(1)));
     }
 }
