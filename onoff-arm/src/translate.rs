@@ -321,6 +321,9 @@ mod tests {
         }
 
         println!("{:?}", cpu_ctx);
+        assert_eq!(cpu_ctx.pc, 16 + 4 + 4 + 8);
+        assert_eq!(cpu_ctx.gprs[0], 16 + 4 + 0);
+        assert_eq!(cpu_ctx.gprs[2], 16 + 8);
 
         let fptr = trans.translate(&[Inst::Adr { rd: 30, label: 32 }, Inst::Ret { rn: 30 }]);
 
@@ -332,5 +335,7 @@ mod tests {
         }
 
         println!("{:?}", cpu_ctx);
+        assert_eq!(cpu_ctx.pc, 32 + 32);
+        assert_eq!(cpu_ctx.gprs[30], 32 + 32);
     }
 }
