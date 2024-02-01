@@ -1,16 +1,20 @@
-use std::collections::HashMap;
-use std::fmt::{Debug, Formatter};
-use smallvec::SmallVec;
 use crate::inst::{Inst, InstDecoder};
 use crate::mem::{Memory, PageMemory};
-use onoff_core::error::Result;
 use crate::translate::{BlockAbi, Translator};
+use lru::LruCache;
+use onoff_core::error::Result;
+use smallvec::SmallVec;
+use std::collections::BTreeMap;
+use std::fmt::{Debug, Formatter};
+use std::num::NonZeroUsize;
 
 pub struct Cpu {
     context: CpuContext,
     memory: PageMemory,
     translator: Translator,
-    code_cache: HashMap<u64, BlockAbi>,
+    code_cache: BTreeMap<u64, BlockAbi>,
+
+    lru: LruCache<u64, BlockAbi>,
 }
 
 pub enum Break {
@@ -25,25 +29,35 @@ impl Cpu {
             context: CpuContext::new(),
             memory: PageMemory::new(),
             translator: Translator::new().unwrap(),
-            code_cache: HashMap::new()
+            code_cache: BTreeMap::new(),
+            lru: LruCache::new(NonZeroUsize::new(512).unwrap()),
         }
     }
 
     /// S: Steps
     pub fn execute<const S: usize>(&mut self) -> Result<Option<Break>> {
-        assert!(S < 64, "too many steps!");
+        assert!(S <= 64, "too many steps!");
 
         let pc = self.context.pc();
 
-        if let Some(&cache) = self.code_cache.get(&pc) {
-            unsafe { cache(&mut self.context); }
-
+        if let Some(&block) = self.lru.get(&pc) {
+            unsafe {
+                block(&mut self.context);
+            }
             return Ok(None);
         }
 
+        if let Some(&block) = self.code_cache.get(&pc) {
+            unsafe {
+                block(&mut self.context);
+            }
+            return Ok(None);
+        }
+
+        // no compiled code found, let's compile.
         let mut v = SmallVec::<Inst, S>::new();
-        for i in 0..S {
-            let Ok(mem) = self.memory.read32(pc + i as u64 * 4) else {
+        for i in 0..S as u64 {
+            let Ok(mem) = self.memory.read32(pc + i * 4) else {
                 break;
             };
 
@@ -57,9 +71,13 @@ impl Cpu {
 
         let block = self.translator.translate(&v);
 
-        unsafe { block(&mut self.context); }
+        unsafe {
+            block(&mut self.context);
+        }
 
-        self.code_cache.insert(pc, block);
+        if let Some((k, v)) = self.lru.push(pc, block) {
+            self.code_cache.insert(k, v);
+        }
 
         Ok(None)
     }
@@ -221,6 +239,14 @@ mod tests {
         let mut cpu = Cpu::new();
 
         cpu.memory_mut().write_exact(&inst, 0x10000).unwrap();
+
+        cpu.set_pc(0x10000);
+        cpu.execute::<2>().unwrap();
+
+        println!("{:?}", cpu);
+
+        assert_eq!(cpu.context().gprs[0], 0x10000 + 12);
+        assert_eq!(cpu.context().pc(), 0x10000 + 4 + 4);
 
         cpu.set_pc(0x10000);
         cpu.execute::<2>().unwrap();

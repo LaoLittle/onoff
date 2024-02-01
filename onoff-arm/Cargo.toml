@@ -9,6 +9,7 @@ onoff-core.workspace = true
 memoffset.workspace = true
 
 smallvec.workspace = true
+lru.workspace = true
 
 # jit
 cranelift.workspace = true

@@ -49,7 +49,7 @@ impl Translator {
 
     /// Translate a set of arm instructions into a basic block targeting the host architecture.
     ///
-    /// The block represents a standard C function, the definition is below:
+    /// The block represents a standard C function, and the definition is below:
     ///
     /// ```c
     /// void bb(context*);
@@ -82,21 +82,47 @@ impl Translator {
 
             let mut save_pc = true;
             let mut pc_add = 0;
-            for inst in insts {
+            for &inst in insts {
                 match inst {
                     ArmInst::Adr { rd, label } => {
                         let pc = saver.load_pc(&mut bcx, pc_add);
-                        let val = bcx.ins().iadd_imm(pc, *label);
-                        saver.store_register(*rd, &mut bcx, val);
+                        let val = bcx.ins().iadd_imm(pc, label);
+                        saver.store_register(rd, &mut bcx, val);
                     }
                     ArmInst::Adrp { rd, label } => {
                         let pc = saver.load_pc(&mut bcx, pc_add);
                         let hi = bcx.ins().band_imm(pc, !4095);
-                        let val = bcx.ins().iadd_imm(hi, *label);
-                        saver.store_register(*rd, &mut bcx, val);
+                        let val = bcx.ins().iadd_imm(hi, label);
+                        saver.store_register(rd, &mut bcx, val);
+                    }
+                    ArmInst::Add { rd, rn, imm, sf } => {
+                        let val = if sf {
+                            let rn = saver.load_register(rn, &mut bcx);
+                            let add = bcx.ins().iadd_imm(rn, imm as i64);
+                            add
+                        } else {
+                            let rn = saver.load_register32(rn, &mut bcx);
+                            let add = bcx.ins().iadd_imm(rn, imm as i64);
+                            bcx.ins().uextend(types::I64, add)
+                        };
+
+                        saver.store_register(rd, &mut bcx, val);
+                    }
+                    ArmInst::Sub { rd, rn, imm, sf } => {
+                        let val = if sf {
+                            let rn = saver.load_register(rn, &mut bcx);
+                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
+                            add
+                        } else {
+                            let rn = saver.load_register32(rn, &mut bcx);
+                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
+                            bcx.ins().uextend(types::I64, add)
+                        };
+
+                        saver.store_register(rd, &mut bcx, val);
                     }
                     ArmInst::Ret { rn } => {
-                        let dest = saver.load_register(*rn, &mut bcx);
+                        let dest = saver.load_register(rn, &mut bcx);
 
                         saver.store_pc(&mut bcx, dest);
 
@@ -106,7 +132,7 @@ impl Translator {
                     }
                     ArmInst::B { label } => {
                         let pc = saver.load_pc(&mut bcx, pc_add);
-                        let dest = bcx.ins().iadd_imm(pc, *label);
+                        let dest = bcx.ins().iadd_imm(pc, label);
 
                         saver.store_pc(&mut bcx, dest);
 
@@ -118,7 +144,7 @@ impl Translator {
                         let pc = saver.load_pc(&mut bcx, pc_add);
                         saver.store_register(REG_LR, &mut bcx, pc);
 
-                        let dest = bcx.ins().iadd_imm(pc, *label);
+                        let dest = bcx.ins().iadd_imm(pc, label);
                         saver.store_pc(&mut bcx, dest);
 
                         save_pc = false;
@@ -182,14 +208,14 @@ impl RegisterSaver {
         }
     }
 
-    pub fn load_register(&mut self, rd: u8, bcx: &mut FunctionBuilder) -> Value {
-        let rds = rd as usize;
+    pub fn load_register(&mut self, rn: u8, bcx: &mut FunctionBuilder) -> Value {
+        let rds = rn as usize;
 
-        let var = Variable::from_u32(rd as u32);
+        let var = Variable::from_u32(rn as u32);
         if self.gprs[rds] {
             bcx.use_var(var)
         } else {
-            let val = get_register(bcx, self.cpu_ctx, rd);
+            let val = get_register(bcx, self.cpu_ctx, rn);
             bcx.declare_var(var, types::I64);
             bcx.def_var(var, val);
             self.gprs[rds] = true;
@@ -197,14 +223,42 @@ impl RegisterSaver {
         }
     }
 
-    pub fn store_register(&mut self, rd: u8, bcx: &mut FunctionBuilder, val: Value) {
-        let var = Variable::from_u32(rd as u32);
-        if !self.gprs[rd as usize] {
+    pub fn load_register32(&mut self, rn: u8, bcx: &mut FunctionBuilder) -> Value {
+        let rds = rn as usize;
+
+        let var = Variable::from_u32(rn as u32);
+        if self.gprs[rds] {
+            let r = bcx.use_var(var);
+            bcx.ins().ireduce(types::I32, r)
+        } else {
+            let val = get_register32(bcx, self.cpu_ctx, rn);
+            bcx.declare_var(var, types::I64);
+            let extended = bcx.ins().uextend(types::I64, val);
+            bcx.def_var(var, extended);
+            self.gprs[rds] = true;
+            val
+        }
+    }
+
+    pub fn store_register(&mut self, rn: u8, bcx: &mut FunctionBuilder, val: Value) {
+        let var = Variable::from_u32(rn as u32);
+        if !self.gprs[rn as usize] {
             bcx.declare_var(var, types::I64);
         }
 
         bcx.def_var(var, val);
-        self.gprs[rd as usize] = true;
+        self.gprs[rn as usize] = true;
+    }
+
+    pub fn store_register32(&mut self, rn: u8, bcx: &mut FunctionBuilder, val: Value) {
+        let var = Variable::from_u32(rn as u32);
+        if !self.gprs[rn as usize] {
+            bcx.declare_var(var, types::I64);
+        }
+
+        let extended = bcx.ins().uextend(types::I64, val);
+        bcx.def_var(var, extended);
+        self.gprs[rn as usize] = true;
     }
 
     pub fn load_pc(&mut self, bcx: &mut FunctionBuilder, add: i64) -> Value {
@@ -249,8 +303,8 @@ impl RegisterSaver {
     }
 }
 
-fn get_register(bcx: &mut FunctionBuilder, cpu_context: Value, rd: u8) -> Value {
-    let rd = rd as usize;
+fn get_register(bcx: &mut FunctionBuilder, cpu_context: Value, rn: u8) -> Value {
+    let rd = rn as usize;
     let offset = memoffset::offset_of!(CpuContext, gprs) + (core::mem::size_of::<u64>() * rd);
 
     bcx.ins().load(
@@ -261,9 +315,37 @@ fn get_register(bcx: &mut FunctionBuilder, cpu_context: Value, rd: u8) -> Value 
     )
 }
 
-fn set_register(bcx: &mut FunctionBuilder, cpu_context: Value, val: Value, rd: u8) {
-    let rd = rd as usize;
+fn get_register32(bcx: &mut FunctionBuilder, cpu_context: Value, rn: u8) -> Value {
+    let rd = rn as usize;
+    let offset = memoffset::offset_of!(CpuContext, gprs)
+        + (core::mem::size_of::<u64>() * rd)
+        + core::mem::size_of::<u32>();
+
+    bcx.ins().load(
+        types::I32,
+        MemFlags::trusted(),
+        cpu_context,
+        i32::try_from(offset).unwrap(),
+    )
+}
+
+fn set_register(bcx: &mut FunctionBuilder, cpu_context: Value, val: Value, rn: u8) {
+    let rd = rn as usize;
     let offset = memoffset::offset_of!(CpuContext, gprs) + (core::mem::size_of::<u64>() * rd);
+
+    bcx.ins().store(
+        MemFlags::trusted(),
+        val,
+        cpu_context,
+        i32::try_from(offset).unwrap(),
+    );
+}
+
+fn set_register32(bcx: &mut FunctionBuilder, cpu_context: Value, val: Value, rn: u8) {
+    let rd = rn as usize;
+    let offset = memoffset::offset_of!(CpuContext, gprs)
+        + (core::mem::size_of::<u64>() * rd)
+        + core::mem::size_of::<u32>();
 
     bcx.ins().store(
         MemFlags::trusted(),
@@ -337,5 +419,46 @@ mod tests {
         println!("{:?}", cpu_ctx);
         assert_eq!(cpu_ctx.pc, 32 + 32);
         assert_eq!(cpu_ctx.gprs[30], 32 + 32);
+
+        let fptr = trans.translate(&[
+            Inst::Add {
+                rd: 0,
+                rn: 0,
+                imm: 12,
+                sf: true,
+            },
+            Inst::Add {
+                rd: 8,
+                rn: 0,
+                imm: 16,
+                sf: false,
+            },
+            Inst::Sub {
+                rd: 4,
+                rn: 8,
+                imm: 14,
+                sf: true,
+            },
+            Inst::Sub {
+                rd: 16,
+                rn: 4,
+                imm: 6,
+                sf: false,
+            },
+        ]);
+
+        let mut cpu_ctx = CpuContext::new();
+        cpu_ctx.pc = 32;
+
+        unsafe {
+            fptr(&mut cpu_ctx);
+        }
+
+        println!("{:?}", cpu_ctx);
+        assert_eq!(cpu_ctx.pc, 32 + 4 * 4);
+        assert_eq!(cpu_ctx.gprs[0], 12);
+        assert_eq!(cpu_ctx.gprs[4], 28 - 14);
+        assert_eq!(cpu_ctx.gprs[8], 12 + 16);
+        assert_eq!(cpu_ctx.gprs[16], 14 - 6);
     }
 }

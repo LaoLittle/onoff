@@ -7,6 +7,8 @@ pub enum Inst {
     Bl { label: i64 },
     Adr { rd: u8, label: i64 },
     Adrp { rd: u8, label: i64 },
+    Add { rd: u8, rn: u8, imm: u32, sf: bool },
+    Sub { rd: u8, rn: u8, imm: u32, sf: bool },
     Ret { rn: u8 },
 }
 
@@ -80,17 +82,17 @@ fn decode_inst_u32(inst: u32) -> Result<Inst> {
 }
 
 // Data process, immediate
-fn decode_dp_imm(inst: u32) -> Result<Inst> {
+const fn decode_dp_imm(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<26, 23>(inst);
 
     match op0 {
         0b000 | 0b001 => decode_pc_rel(inst),
-
+        0b010 => decode_addsub_imm(inst),
         _ => Err(Error::NotSupported),
     }
 }
 
-fn decode_pc_rel(inst: u32) -> Result<Inst> {
+const fn decode_pc_rel(inst: u32) -> Result<Inst> {
     let op = extract_field::<32, 31>(inst);
     let immlo = extract_field::<31, 29>(inst);
     let immhi = extract_field::<24, 5>(inst);
@@ -108,6 +110,41 @@ fn decode_pc_rel(inst: u32) -> Result<Inst> {
     };
 
     Ok(inst)
+}
+
+const fn decode_addsub_imm(inst: u32) -> Result<Inst> {
+    let sf = extract_field::<32, 31>(inst);
+    let op = extract_field::<31, 30>(inst);
+    let s = extract_field::<30, 29>(inst);
+    // shift
+    let sh = extract_field::<23, 22>(inst);
+    let imm12 = extract_field::<22, 10>(inst);
+    let rn = extract_field::<10, 5>(inst);
+    let rd = extract_field::<5, 0>(inst);
+
+    match (op, s) {
+        (0b0, 0b0) => decode_add_imm(sf == 1, sh == 1, imm12, rn, rd),
+        (0b1, 0b0) => decode_sub_imm(sf == 1, sh == 1, imm12, rn, rd),
+        _ => unreachable!(),
+    }
+}
+
+const fn decode_add_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Add {
+        rd: rd as u8,
+        rn: rn as u8,
+        imm: if sh { imm << 12 } else { imm },
+        sf,
+    })
+}
+
+const fn decode_sub_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Sub {
+        rd: rd as u8,
+        rn: rn as u8,
+        imm: if sh { imm << 12 } else { imm },
+        sf,
+    })
 }
 
 // Branch, Exception Generating and System
@@ -187,8 +224,8 @@ mod tests {
     #[test]
     fn decode() {
         let inst = [
-            0x7e, 0x05, 0x00, 0x14, 0x05, 0x03, 0x00, 0xd0, 0x46, 0x14, 0x00, 0xf0, 0x00, 0x00,
-            0x00, 0x90, 0x00, 0x00, 0x00, 0xb0, 0xc0, 0x03, 0x5f, 0xd6,
+            0x7e, 0x05, 0x00, 0x14, 0x46, 0x14, 0x00, 0xf0, 0xc0, 0x03, 0x5f, 0xd6, 0xff, 0x83,
+            0x01, 0xd1,
         ];
 
         let mut decoder = InstDecoder::new(inst.as_slice());

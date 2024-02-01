@@ -21,6 +21,7 @@ bitflags = "2.4.2"
 sharded-slab = "0.1.7"
 tracing = "0.1.40"
 bytes = "1.5.0"
+lru = "0.12.2"
 
 # compression
 lz4_flex = "0.11.2"
