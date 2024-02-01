@@ -10,6 +10,7 @@ memoffset.workspace = true
 
 smallvec.workspace = true
 lru.workspace = true
+modular-bitfield.workspace = true
 
 # jit
 cranelift.workspace = true

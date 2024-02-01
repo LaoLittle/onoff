@@ -4,6 +4,7 @@ use cranelift::codegen::ir::UserFuncName;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
+use modular_bitfield::{bitfield, BitfieldSpecifier};
 use onoff_core::error::{Error, Result};
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -14,7 +15,33 @@ pub struct Translator {
     debug: bool,
 }
 
-pub type BlockAbi = unsafe extern "C" fn(*mut CpuContext) -> u64;
+pub type BlockAbi = unsafe extern "C" fn(*mut CpuContext) -> u32;
+
+#[derive(BitfieldSpecifier, Debug, PartialEq, Eq)]
+#[bits = 16]
+pub enum InterruptType {
+    None = 0,
+    Udf = 1,
+    Svc = 2,
+}
+
+#[bitfield]
+pub struct ExecutionReturn {
+    pub ty: InterruptType,
+    pub val: u16,
+}
+
+impl ExecutionReturn {
+    #[inline]
+    pub const fn into_u32(self) -> u32 {
+        u32::from_ne_bytes(self.into_bytes())
+    }
+
+    #[inline]
+    pub const fn from_u32(i: u32) -> Self {
+        Self::from_bytes(i.to_ne_bytes())
+    }
+}
 
 impl Translator {
     pub fn new() -> Result<Self> {
@@ -32,7 +59,7 @@ impl Translator {
 
         let mut signature = module.make_signature();
         signature.params.push(AbiParam::new(types::R64));
-        signature.returns.push(AbiParam::new(types::I64));
+        signature.returns.push(AbiParam::new(types::I32));
 
         Ok(Self {
             module,
@@ -81,16 +108,25 @@ impl Translator {
             let mut saver = RegisterSaver::new(ctx);
 
             let mut save_pc = true;
-            let mut pc_add = 0;
+            let mut ret = ExecutionReturn::new()
+                .with_ty(InterruptType::None)
+                .with_val(0);
+
             for &inst in insts {
                 match inst {
+                    ArmInst::Udf { imm } => {
+                        ret.set_ty(InterruptType::Udf);
+                        ret.set_val(imm);
+
+                        break;
+                    }
                     ArmInst::Adr { rd, label } => {
-                        let pc = saver.load_pc(&mut bcx, pc_add);
+                        let pc = saver.load_pc(&mut bcx);
                         let val = bcx.ins().iadd_imm(pc, label);
                         saver.store_register(rd, &mut bcx, val);
                     }
                     ArmInst::Adrp { rd, label } => {
-                        let pc = saver.load_pc(&mut bcx, pc_add);
+                        let pc = saver.load_pc(&mut bcx);
                         let hi = bcx.ins().band_imm(pc, !4095);
                         let val = bcx.ins().iadd_imm(hi, label);
                         saver.store_register(rd, &mut bcx, val);
@@ -108,6 +144,120 @@ impl Translator {
 
                         saver.store_register(rd, &mut bcx, val);
                     }
+                    ArmInst::Adds { rd, rn, imm, sf } => {
+                        let rn = if sf {
+                            saver.load_register(rn, &mut bcx)
+                        } else {
+                            saver.load_register32(rn, &mut bcx)
+                        };
+
+                        let val = if sf {
+                            let add = bcx.ins().iadd_imm(rn, imm as i64);
+                            add
+                        } else {
+                            let add = bcx.ins().iadd_imm(rn, imm as i64);
+                            bcx.ins().uextend(types::I64, add)
+                        };
+
+                        saver.store_register(rd, &mut bcx, val);
+
+                        let f = bcx.ins().iconst(types::I8, 0);
+
+                        // true if the value is negative
+                        let is_neg = if sf {
+                            bcx.ins().ushr_imm(val, 63)
+                        } else {
+                            bcx.ins().ushr_imm(val, 31)
+                        };
+
+                        let nt = bcx.ins().iconst(types::I8, N_MASK);
+                        let n = bcx.ins().select(is_neg, nt, f);
+                        saver.store_n(&mut bcx, n);
+
+                        let zt = bcx.ins().iconst(types::I8, Z_MASK);
+                        let z = bcx.ins().select(val, f, zt);
+                        saver.store_z(&mut bcx, z);
+
+                        // todo: optimize it
+                        let (is_c, is_v) = if sf {
+                            let imm = bcx.ins().iconst(types::I64, imm as i64);
+                            let (_, c) = bcx.ins().uadd_overflow(rn, imm);
+                            let (_, v) = bcx.ins().sadd_overflow(rn, imm);
+
+                            (c, v)
+                        } else {
+                            let imm = bcx.ins().iconst(types::I32, imm as i64);
+                            let (_, c) = bcx.ins().uadd_overflow(rn, imm);
+                            let (_, v) = bcx.ins().sadd_overflow(rn, imm);
+
+                            (c, v)
+                        };
+
+                        let ct = bcx.ins().iconst(types::I8, C_MASK);
+                        let c = bcx.ins().select(is_c, ct, f);
+                        saver.store_c(&mut bcx, c);
+
+                        let vt = bcx.ins().iconst(types::I8, V_MASK);
+                        let v = bcx.ins().select(is_v, vt, f);
+                        saver.store_v(&mut bcx, v);
+                    }
+                    ArmInst::Subs { rd, rn, imm, sf } => {
+                        let rn = if sf {
+                            saver.load_register(rn, &mut bcx)
+                        } else {
+                            saver.load_register32(rn, &mut bcx)
+                        };
+
+                        let val = if sf {
+                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
+                            add
+                        } else {
+                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
+                            bcx.ins().uextend(types::I64, add)
+                        };
+
+                        saver.store_register(rd, &mut bcx, val);
+
+                        let f = bcx.ins().iconst(types::I8, 0);
+
+                        // true if the value is negative
+                        let is_neg = if sf {
+                            bcx.ins().ushr_imm(val, 63)
+                        } else {
+                            bcx.ins().ushr_imm(val, 31)
+                        };
+
+                        let nt = bcx.ins().iconst(types::I8, N_MASK);
+                        let n = bcx.ins().select(is_neg, nt, f);
+                        saver.store_n(&mut bcx, n);
+
+                        let zt = bcx.ins().iconst(types::I8, Z_MASK);
+                        let z = bcx.ins().select(val, f, zt);
+                        saver.store_z(&mut bcx, z);
+
+                        // todo: optimize it
+                        let (is_c, is_v) = if sf {
+                            let imm = bcx.ins().iconst(types::I64, imm as i64);
+                            let (_, c) = bcx.ins().usub_overflow(rn, imm);
+                            let (_, v) = bcx.ins().ssub_overflow(rn, imm);
+
+                            (c, v)
+                        } else {
+                            let imm = bcx.ins().iconst(types::I32, imm as i64);
+                            let (_, c) = bcx.ins().usub_overflow(rn, imm);
+                            let (_, v) = bcx.ins().ssub_overflow(rn, imm);
+
+                            (c, v)
+                        };
+
+                        let ct = bcx.ins().iconst(types::I8, C_MASK);
+                        let c = bcx.ins().select(is_c, ct, f);
+                        saver.store_c(&mut bcx, c);
+
+                        let vt = bcx.ins().iconst(types::I8, V_MASK);
+                        let v = bcx.ins().select(is_v, vt, f);
+                        saver.store_v(&mut bcx, v);
+                    }
                     ArmInst::Sub { rd, rn, imm, sf } => {
                         let val = if sf {
                             let rn = saver.load_register(rn, &mut bcx);
@@ -121,27 +271,43 @@ impl Translator {
 
                         saver.store_register(rd, &mut bcx, val);
                     }
-                    ArmInst::Ret { rn } => {
+                    ArmInst::Svc { imm } => {
+                        ret.set_ty(InterruptType::Svc);
+                        ret.set_val(imm);
+
+                        break;
+                    }
+                    ArmInst::Nop => {
+                        bcx.ins().nop();
+                    }
+                    // ret will give a hint to cpu
+                    ArmInst::Br { rn } | ArmInst::Ret { rn } => {
                         let dest = saver.load_register(rn, &mut bcx);
-
                         saver.store_pc(&mut bcx, dest);
+                        save_pc = false;
 
+                        break;
+                    }
+                    ArmInst::Blr { rn } => {
+                        let pc = saver.load_pc(&mut bcx);
+                        saver.store_register(REG_LR, &mut bcx, pc);
+
+                        let dest = saver.load_register(rn, &mut bcx);
+                        saver.store_pc(&mut bcx, dest);
                         save_pc = false;
 
                         break;
                     }
                     ArmInst::B { label } => {
-                        let pc = saver.load_pc(&mut bcx, pc_add);
+                        let pc = saver.load_pc(&mut bcx);
                         let dest = bcx.ins().iadd_imm(pc, label);
-
                         saver.store_pc(&mut bcx, dest);
-
                         save_pc = false;
 
                         break;
                     }
                     ArmInst::Bl { label } => {
-                        let pc = saver.load_pc(&mut bcx, pc_add);
+                        let pc = saver.load_pc(&mut bcx);
                         saver.store_register(REG_LR, &mut bcx, pc);
 
                         let dest = bcx.ins().iadd_imm(pc, label);
@@ -153,17 +319,17 @@ impl Translator {
                     }
                 }
 
-                pc_add += 4;
+                saver.update_pc();
             }
 
             if save_pc {
-                let val = saver.load_pc(&mut bcx, pc_add);
+                let val = saver.load_pc(&mut bcx);
                 saver.store_pc(&mut bcx, val);
             }
 
             saver.save_registers(&mut bcx);
 
-            let ret = bcx.ins().iconst(types::I64, 0);
+            let ret = bcx.ins().iconst(types::I32, ret.into_u32() as i64);
             bcx.ins().return_(&[ret]);
             bcx.seal_all_blocks();
             bcx.finalize();
@@ -191,20 +357,53 @@ impl Translator {
     }
 }
 
+const N_MASK: i64 = 0b10000000;
+const Z_MASK: i64 = 0b01000000;
+const C_MASK: i64 = 0b00100000;
+const V_MASK: i64 = 0b00010000;
+
+struct PState {
+    n: bool,
+    z: bool,
+    c: bool,
+    v: bool,
+}
+
+impl PState {
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            n: false,
+            z: false,
+            c: false,
+            v: false,
+        }
+    }
+}
+
 struct RegisterSaver {
     gprs: [bool; 32], // pointers to the registers
     pc: bool,
+    pstate: Option<PState>,
     cpu_ctx: Value,
+    pc_offset: i64,
 }
 
 const PC_VAR: u32 = 100;
+const PSTATE_VAR: u32 = 101;
+const N_VAR: u32 = 110;
+const Z_VAR: u32 = 111;
+const C_VAR: u32 = 112;
+const V_VAR: u32 = 113;
 
 impl RegisterSaver {
     pub fn new(cpu_ctx: Value) -> Self {
         Self {
             gprs: [false; 32],
             pc: false,
+            pstate: None,
             cpu_ctx,
+            pc_offset: 0,
         }
     }
 
@@ -261,29 +460,208 @@ impl RegisterSaver {
         self.gprs[rn as usize] = true;
     }
 
-    pub fn load_pc(&mut self, bcx: &mut FunctionBuilder, add: i64) -> Value {
+    pub fn load_pc(&mut self, bcx: &mut FunctionBuilder) -> Value {
         let var = Variable::from_u32(PC_VAR);
         if !self.pc {
             bcx.declare_var(var, types::I64);
             let pc = get_pc(bcx, self.cpu_ctx);
             bcx.def_var(var, pc);
+            self.pc = true;
         }
 
-        self.pc = true;
-
         let rel = bcx.use_var(var);
-        bcx.ins().iadd_imm(rel, add)
+        bcx.ins().iadd_imm(rel, self.pc_offset)
     }
 
     pub fn store_pc(&mut self, bcx: &mut FunctionBuilder, val: Value) {
         let var = Variable::from_u32(PC_VAR);
         if !self.pc {
             bcx.declare_var(var, types::I64);
+            self.pc = true;
         }
 
-        self.pc = true;
-
         bcx.def_var(var, val);
+    }
+
+    #[inline]
+    pub fn update_pc(&mut self) {
+        self.pc_offset += 4;
+    }
+
+    /// load the whole pstate
+    pub fn load_pstate(&mut self, bcx: &mut FunctionBuilder) -> Value {
+        let var = Variable::from_u32(PSTATE_VAR);
+        if self.pstate.is_none() {
+            bcx.declare_var(var, types::I8);
+            bcx.declare_var(Variable::from_u32(N_VAR), types::I8);
+            bcx.declare_var(Variable::from_u32(Z_VAR), types::I8);
+            bcx.declare_var(Variable::from_u32(C_VAR), types::I8);
+            bcx.declare_var(Variable::from_u32(V_VAR), types::I8);
+            let pstate = get_pstate(bcx, self.cpu_ctx);
+            bcx.def_var(var, pstate);
+            self.pstate = Some(PState::new());
+        }
+
+        bcx.use_var(var)
+    }
+
+    /// store the whole pstate
+    pub fn store_pstate(&mut self, bcx: &mut FunctionBuilder, pstate: Value) {
+        let var = Variable::from_u32(PSTATE_VAR);
+        if self.pstate.is_none() {
+            bcx.declare_var(var, types::I8);
+            bcx.declare_var(Variable::from_u32(N_VAR), types::I8);
+            bcx.declare_var(Variable::from_u32(Z_VAR), types::I8);
+            bcx.declare_var(Variable::from_u32(C_VAR), types::I8);
+            bcx.declare_var(Variable::from_u32(V_VAR), types::I8);
+            self.pstate = Some(PState::new());
+        }
+
+        bcx.def_var(var, pstate);
+    }
+
+    pub fn load_n(&mut self, bcx: &mut FunctionBuilder) -> Value {
+        let var = Variable::from_u32(N_VAR);
+
+        let pval = self.load_pstate(bcx);
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        if pstate.n {
+            bcx.use_var(var)
+        } else {
+            let bit = bcx.ins().band_imm(pval, N_MASK);
+
+            bcx.def_var(var, bit);
+            pstate.n = true;
+            bit
+        }
+    }
+
+    pub fn store_n(&mut self, bcx: &mut FunctionBuilder, n: Value) {
+        let var = Variable::from_u32(N_VAR);
+
+        if self.pstate.is_none() {
+            self.load_pstate(bcx);
+        }
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        pstate.n = true;
+
+        bcx.def_var(var, n);
+    }
+
+    pub fn load_z(&mut self, bcx: &mut FunctionBuilder) -> Value {
+        let var = Variable::from_u32(Z_VAR);
+
+        let pval = self.load_pstate(bcx);
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        if pstate.z {
+            bcx.use_var(var)
+        } else {
+            let bit = bcx.ins().band_imm(pval, Z_MASK);
+
+            bcx.def_var(var, bit);
+            pstate.z = true;
+            bit
+        }
+    }
+
+    pub fn store_z(&mut self, bcx: &mut FunctionBuilder, n: Value) {
+        let var = Variable::from_u32(Z_VAR);
+
+        if self.pstate.is_none() {
+            self.load_pstate(bcx);
+        }
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        pstate.z = true;
+
+        bcx.def_var(var, n);
+    }
+
+    pub fn load_c(&mut self, bcx: &mut FunctionBuilder) -> Value {
+        let var = Variable::from_u32(C_VAR);
+
+        let pval = self.load_pstate(bcx);
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        if pstate.c {
+            bcx.use_var(var)
+        } else {
+            let bit = bcx.ins().band_imm(pval, C_MASK);
+
+            bcx.def_var(var, bit);
+            pstate.c = true;
+            bit
+        }
+    }
+
+    pub fn store_c(&mut self, bcx: &mut FunctionBuilder, n: Value) {
+        let var = Variable::from_u32(C_VAR);
+
+        if self.pstate.is_none() {
+            self.load_pstate(bcx);
+        }
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        pstate.c = true;
+
+        bcx.def_var(var, n);
+    }
+
+    pub fn load_v(&mut self, bcx: &mut FunctionBuilder) -> Value {
+        let var = Variable::from_u32(V_VAR);
+
+        let pval = self.load_pstate(bcx);
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        if pstate.v {
+            bcx.use_var(var)
+        } else {
+            let bit = bcx.ins().band_imm(pval, V_MASK);
+
+            bcx.def_var(var, bit);
+            pstate.v = true;
+            bit
+        }
+    }
+
+    pub fn store_v(&mut self, bcx: &mut FunctionBuilder, n: Value) {
+        let var = Variable::from_u32(V_VAR);
+
+        if self.pstate.is_none() {
+            self.load_pstate(bcx);
+        }
+
+        let Some(pstate) = &mut self.pstate else {
+            unreachable!("pstate should be defined in the context!");
+        };
+
+        pstate.v = true;
+
+        bcx.def_var(var, n);
     }
 
     pub fn save_registers(self, bcx: &mut FunctionBuilder) {
@@ -299,6 +677,32 @@ impl RegisterSaver {
         if self.pc {
             let pc = bcx.use_var(Variable::from_u32(PC_VAR));
             set_pc(bcx, self.cpu_ctx, pc);
+        }
+
+        if let Some(pstate) = self.pstate {
+            let mut var = bcx.use_var(Variable::from_u32(PSTATE_VAR));
+
+            if pstate.n {
+                let n = bcx.use_var(Variable::from_u32(N_VAR));
+                var = bcx.ins().bor(var, n);
+            }
+
+            if pstate.z {
+                let z = bcx.use_var(Variable::from_u32(Z_VAR));
+                var = bcx.ins().bor(var, z);
+            }
+
+            if pstate.c {
+                let c = bcx.use_var(Variable::from_u32(C_VAR));
+                var = bcx.ins().bor(var, c);
+            }
+
+            if pstate.v {
+                let v = bcx.use_var(Variable::from_u32(V_VAR));
+                var = bcx.ins().bor(var, v);
+            }
+
+            set_pstate(bcx, self.cpu_ctx, var);
         }
     }
 }
@@ -379,11 +783,33 @@ fn set_pc(bcx: &mut FunctionBuilder, cpu_context: Value, pc: Value) {
     );
 }
 
+fn get_pstate(bcx: &mut FunctionBuilder, cpu_context: Value) -> Value {
+    let offset = memoffset::offset_of!(CpuContext, pstate);
+
+    bcx.ins().load(
+        types::I8,
+        MemFlags::trusted(),
+        cpu_context,
+        i32::try_from(offset).unwrap(),
+    )
+}
+
+fn set_pstate(bcx: &mut FunctionBuilder, cpu_context: Value, pstate: Value) {
+    let offset = memoffset::offset_of!(CpuContext, pstate);
+
+    bcx.ins().store(
+        MemFlags::trusted(),
+        pstate,
+        cpu_context,
+        i32::try_from(offset).unwrap(),
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use crate::context::CpuContext;
     use crate::inst::Inst;
-    use crate::translate::Translator;
+    use crate::translate::{ExecutionReturn, InterruptType, Translator, N_MASK};
 
     #[test]
     fn gen() {
@@ -460,5 +886,56 @@ mod tests {
         assert_eq!(cpu_ctx.gprs[4], 28 - 14);
         assert_eq!(cpu_ctx.gprs[8], 12 + 16);
         assert_eq!(cpu_ctx.gprs[16], 14 - 6);
+
+        let fptr = trans.translate(&[Inst::Udf { imm: 114 }]);
+
+        let mut cpu_ctx = CpuContext::new();
+        cpu_ctx.pc = 32;
+
+        let status = unsafe { fptr(&mut cpu_ctx) };
+
+        let ret = ExecutionReturn::from_u32(status);
+
+        assert_eq!(ret.ty(), InterruptType::Udf);
+        assert_eq!(ret.val(), 114);
+
+        let fptr = trans.translate(&[
+            Inst::Add {
+                rd: 0,
+                rn: 0,
+                imm: u32::MAX as u32,
+                sf: false,
+            },
+            Inst::Adds {
+                rd: 0,
+                rn: 0,
+                imm: 1,
+                sf: false,
+            },
+            Inst::Sub {
+                rd: 1,
+                rn: 1,
+                imm: i32::MAX as u32,
+                sf: false,
+            },
+            Inst::Subs {
+                rd: 1,
+                rn: 1,
+                imm: 1,
+                sf: false,
+            },
+            Inst::Nop,
+            Inst::Svc { imm: 2 },
+        ]);
+
+        let mut cpu_ctx = CpuContext::new();
+        cpu_ctx.pc = 32;
+
+        let status = unsafe { fptr(&mut cpu_ctx) };
+        let exec = ExecutionReturn::from_u32(status);
+
+        println!("{:08b}", cpu_ctx.pstate);
+        println!("{:?}", cpu_ctx);
+        dbg!(exec.ty(), exec.val());
     }
 }

@@ -3,13 +3,34 @@ use std::io::Read;
 
 #[derive(Debug, Copy, Clone)]
 pub enum Inst {
-    B { label: i64 },
-    Bl { label: i64 },
-    Adr { rd: u8, label: i64 },
-    Adrp { rd: u8, label: i64 },
-    Add { rd: u8, rn: u8, imm: u32, sf: bool },
-    Sub { rd: u8, rn: u8, imm: u32, sf: bool },
+    /// `UDF #<imm>`
+    Udf { imm: u16 },
+    /// `SVC #<imm>`
+    Svc { imm: u16 },
+    /// `NOP`
+    Nop,
+    /// `BR <Xn>`
+    Br { rn: u8 },
+    /// `BLR <Xn>`
+    Blr { rn: u8 },
+    /// `RET <Rn>`
     Ret { rn: u8 },
+    /// `B <label>`
+    B { label: i64 },
+    /// `BL <label>`
+    Bl { label: i64 },
+    /// `ADR <Xd>, <label>`
+    Adr { rd: u8, label: i64 },
+    /// `ADRP <Xd>, <label>`
+    Adrp { rd: u8, label: i64 },
+    /// `ADD <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
+    Add { rd: u8, rn: u8, imm: u32, sf: bool },
+    /// `ADDS <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
+    Adds { rd: u8, rn: u8, imm: u32, sf: bool },
+    /// `SUB <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
+    Sub { rd: u8, rn: u8, imm: u32, sf: bool },
+    /// `SUBS <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
+    Subs { rd: u8, rn: u8, imm: u32, sf: bool },
 }
 
 pub struct InstDecoder<R> {
@@ -67,18 +88,39 @@ impl<R: Read> Iterator for IntoIter<R> {
     }
 }
 
+#[inline]
+const fn unspported() -> Result<Inst> {
+    Err(Error::NotSupported)
+}
+
 fn decode_inst_u32(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<29, 24>(inst);
 
-    let inst = match op0 {
+    match op0 {
+        // Reserved
+        0b00000 | 0b00001 => decode_reserved(inst),
         // Data Processing -- Immediate
-        0b10000 | 0b10001 | 0b10010 | 0b10011 => decode_dp_imm(inst)?,
+        0b10000 | 0b10001 | 0b10010 | 0b10011 => decode_dp_imm(inst),
         // Branches, Exception Generating and System instructions
-        0b10100 | 0b10101 | 0b10110 | 0b10111 => decode_bes(inst)?,
-        _ => return Err(Error::NotSupported),
-    };
+        0b10100 | 0b10101 | 0b10110 | 0b10111 => decode_bes(inst),
+        _ => unspported(),
+    }
+}
 
-    Ok(inst)
+const fn decode_reserved(inst: u32) -> Result<Inst> {
+    let op0 = extract_field::<32, 29>(inst);
+    let op1 = extract_field::<25, 16>(inst);
+
+    match (op0, op1) {
+        (0b000, 0b000000000) => decode_udf(inst),
+        _ => unspported(),
+    }
+}
+
+const fn decode_udf(inst: u32) -> Result<Inst> {
+    let imm = extract_field::<16, 0>(inst);
+
+    Ok(Inst::Udf { imm: imm as u16 })
 }
 
 // Data process, immediate
@@ -88,7 +130,7 @@ const fn decode_dp_imm(inst: u32) -> Result<Inst> {
     match op0 {
         0b000 | 0b001 => decode_pc_rel(inst),
         0b010 => decode_addsub_imm(inst),
-        _ => Err(Error::NotSupported),
+        _ => unspported(),
     }
 }
 
@@ -101,8 +143,8 @@ const fn decode_pc_rel(inst: u32) -> Result<Inst> {
     let imm = sign_extend_64::<21>((immhi << 2) | immlo);
 
     let inst = match op {
-        0 => Inst::Adr { rd, label: imm },
-        1 => Inst::Adrp {
+        0b0 => Inst::Adr { rd, label: imm },
+        0b1 => Inst::Adrp {
             rd,
             label: imm * 4096,
         },
@@ -122,9 +164,14 @@ const fn decode_addsub_imm(inst: u32) -> Result<Inst> {
     let rn = extract_field::<10, 5>(inst);
     let rd = extract_field::<5, 0>(inst);
 
+    let sf = sf == 1;
+    let sh = sh == 1;
+
     match (op, s) {
-        (0b0, 0b0) => decode_add_imm(sf == 1, sh == 1, imm12, rn, rd),
-        (0b1, 0b0) => decode_sub_imm(sf == 1, sh == 1, imm12, rn, rd),
+        (0b0, 0b0) => decode_add_imm(sf, sh, imm12, rn, rd),
+        (0b1, 0b0) => decode_sub_imm(sf, sh, imm12, rn, rd),
+        (0b0, 0b1) => decode_adds_imm(sf, sh, imm12, rn, rd),
+        (0b1, 0b1) => decode_subs_imm(sf, sh, imm12, rn, rd),
         _ => unreachable!(),
     }
 }
@@ -147,18 +194,67 @@ const fn decode_sub_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Resul
     })
 }
 
+const fn decode_adds_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Adds {
+        rd: rd as u8,
+        rn: rn as u8,
+        imm: if sh { imm << 12 } else { imm },
+        sf,
+    })
+}
+
+const fn decode_subs_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Subs {
+        rd: rd as u8,
+        rn: rn as u8,
+        imm: if sh { imm << 12 } else { imm },
+        sf,
+    })
+}
+
 // Branch, Exception Generating and System
 const fn decode_bes(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<32, 29>(inst);
     let op1 = extract_field::<26, 12>(inst);
     let op2 = extract_field::<5, 0>(inst);
 
-    let op1_sign = extract_field::<26, 25>(inst);
+    let op1_f = extract_field::<26, 25>(inst);
+    let op1_f2 = extract_field::<26, 24>(inst);
 
     match (op0, op1) {
-        (0b110, 0b01000000110010) if op2 == 0b11111 => todo!(),
-        (0b110, _) if op1_sign == 0b1 => decode_ubr_reg(inst),
+        (0b010, _) if op1_f == 0b0 => todo!(), // B.cond
+        (0b110, _) if op1_f2 == 0b00 => decode_except_gen(inst),
+        (0b110, 0b01000000110010) if op2 == 0b11111 => decode_hints(inst), // hints
+        (0b110, _) if op1_f == 0b1 => decode_ubr_reg(inst),
         (0b000 | 0b100, _) => decode_ubr_imm(inst),
+        _ => Err(Error::NotSupported),
+    }
+}
+
+// Exception generation
+const fn decode_except_gen(inst: u32) -> Result<Inst> {
+    let opc = extract_field::<24, 21>(inst);
+    let imm16 = extract_field::<21, 5>(inst);
+    let op2 = extract_field::<5, 2>(inst);
+    let ll = extract_field::<2, 0>(inst);
+
+    let imm = imm16 as u16;
+
+    let inst = match (opc, op2, ll) {
+        (0b000, 0b000, 0b01) => Inst::Svc { imm },
+        _ => return Err(Error::NotSupported),
+    };
+
+    Ok(inst)
+}
+
+// Hints
+const fn decode_hints(inst: u32) -> Result<Inst> {
+    let crm = extract_field::<12, 8>(inst);
+    let op2 = extract_field::<8, 5>(inst);
+
+    match (crm, op2) {
+        (0b0000, 0b000) => Ok(Inst::Nop),
         _ => Err(Error::NotSupported),
     }
 }
@@ -172,14 +268,23 @@ const fn decode_ubr_reg(inst: u32) -> Result<Inst> {
     let op4 = extract_field::<5, 0>(inst);
 
     match (opc, op3) {
-        (_, _) if op2 != 0b11111 => Err(Error::NotSupported),
-        (0b0000, 0b000000) if op4 == 0b00000 => todo!(), // BR
-        (0b0010, 0b000000) if op4 == 0b00000 => decode_ubr_reg_ret(rn), // RET
+        _ if op2 != 0b11111 => Err(Error::NotSupported),
+        (0b0000, 0b000000) if op4 == 0b00000 => decode_br(rn),
+        (0b0001, 0b000000) if op4 == 0b00000 => decode_blr(rn),
+        (0b0010, 0b000000) if op4 == 0b00000 => decode_ret(rn),
         _ => Err(Error::NotSupported),
     }
 }
 
-const fn decode_ubr_reg_ret(rn: u32) -> Result<Inst> {
+const fn decode_br(rn: u32) -> Result<Inst> {
+    Ok(Inst::Br { rn: rn as u8 })
+}
+
+const fn decode_blr(rn: u32) -> Result<Inst> {
+    Ok(Inst::Blr { rn: rn as u8 })
+}
+
+const fn decode_ret(rn: u32) -> Result<Inst> {
     Ok(Inst::Ret { rn: rn as u8 })
 }
 
@@ -191,8 +296,8 @@ const fn decode_ubr_imm(inst: u32) -> Result<Inst> {
     let label = imm * 4;
 
     Ok(match op {
-        0 => Inst::B { label },
-        1 => Inst::Bl { label },
+        0b0 => Inst::B { label },
+        0b1 => Inst::Bl { label },
         _ => unreachable!(),
     })
 }
