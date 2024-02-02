@@ -1,5 +1,5 @@
 use crate::context::{CpuContext, REG_LR};
-use crate::inst::Inst as ArmInst;
+use crate::inst::{Inst as ArmInst, Operand, ShiftType};
 use cranelift::codegen::ir::UserFuncName;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -131,145 +131,54 @@ impl Translator {
                         let val = bcx.ins().iadd_imm(hi, label);
                         saver.store_register(rd, &mut bcx, val);
                     }
-                    ArmInst::Add { rd, rn, imm, sf } => {
-                        let val = if sf {
-                            let rn = saver.load_register(rn, &mut bcx);
-                            let add = bcx.ins().iadd_imm(rn, imm as i64);
-                            add
-                        } else {
-                            let rn = saver.load_register32(rn, &mut bcx);
-                            let add = bcx.ins().iadd_imm(rn, imm as i64);
-                            bcx.ins().uextend(types::I64, add)
-                        };
+                    ArmInst::Add { rd, rn, op2, sf } => {
+                        let rn = saver.load_register_with_sf(rn, &mut bcx, sf);
+                        let op2 = saver.load_operand(&mut bcx, op2, sf);
+                        let val = bcx.ins().iadd(rn, op2);
 
-                        saver.store_register(rd, &mut bcx, val);
+                        saver.store_register_with_sf(rd, &mut bcx, val, sf);
                     }
-                    ArmInst::Adds { rd, rn, imm, sf } => {
-                        let rn = if sf {
-                            saver.load_register(rn, &mut bcx)
-                        } else {
-                            saver.load_register32(rn, &mut bcx)
-                        };
+                    ArmInst::Adds { rd, rn, op2, sf } => {
+                        let rn = saver.load_register_with_sf(rn, &mut bcx, sf);
+                        let op2 = saver.load_operand(&mut bcx, op2, sf);
 
-                        let val = if sf {
-                            let add = bcx.ins().iadd_imm(rn, imm as i64);
-                            add
-                        } else {
-                            let add = bcx.ins().iadd_imm(rn, imm as i64);
-                            bcx.ins().uextend(types::I64, add)
-                        };
+                        let val = bcx.ins().iadd(rn, op2);
 
-                        saver.store_register(rd, &mut bcx, val);
+                        saver.store_register_with_sf(rd, &mut bcx, val, sf);
 
-                        let f = bcx.ins().iconst(types::I8, 0);
-
-                        // true if the value is negative
-                        let is_neg = if sf {
-                            bcx.ins().ushr_imm(val, 63)
-                        } else {
-                            bcx.ins().ushr_imm(val, 31)
-                        };
-
-                        let nt = bcx.ins().iconst(types::I8, N_MASK);
-                        let n = bcx.ins().select(is_neg, nt, f);
-                        saver.store_n(&mut bcx, n);
-
-                        let zt = bcx.ins().iconst(types::I8, Z_MASK);
-                        let z = bcx.ins().select(val, f, zt);
-                        saver.store_z(&mut bcx, z);
-
-                        // todo: optimize it
-                        let (is_c, is_v) = if sf {
-                            let imm = bcx.ins().iconst(types::I64, imm as i64);
-                            let (_, c) = bcx.ins().uadd_overflow(rn, imm);
-                            let (_, v) = bcx.ins().sadd_overflow(rn, imm);
-
-                            (c, v)
-                        } else {
-                            let imm = bcx.ins().iconst(types::I32, imm as i64);
-                            let (_, c) = bcx.ins().uadd_overflow(rn, imm);
-                            let (_, v) = bcx.ins().sadd_overflow(rn, imm);
-
-                            (c, v)
-                        };
-
-                        let ct = bcx.ins().iconst(types::I8, C_MASK);
-                        let c = bcx.ins().select(is_c, ct, f);
-                        saver.store_c(&mut bcx, c);
-
-                        let vt = bcx.ins().iconst(types::I8, V_MASK);
-                        let v = bcx.ins().select(is_v, vt, f);
-                        saver.store_v(&mut bcx, v);
+                        saver.check_alu_pstate(&mut bcx, val, rn, op2, sf, |bcx, us, x, y| {
+                            if us {
+                                bcx.ins().uadd_overflow(x, y).1
+                            } else {
+                                bcx.ins().sadd_overflow(x, y).1
+                            }
+                        });
                     }
-                    ArmInst::Subs { rd, rn, imm, sf } => {
-                        let rn = if sf {
-                            saver.load_register(rn, &mut bcx)
-                        } else {
-                            saver.load_register32(rn, &mut bcx)
-                        };
+                    ArmInst::Sub { rd, rn, op2, sf } => {
+                        let rn = saver.load_register_with_sf(rn, &mut bcx, sf);
+                        let op2 = saver.load_operand(&mut bcx, op2, sf);
+                        let neg = bcx.ins().ineg(op2);
 
-                        let val = if sf {
-                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
-                            add
-                        } else {
-                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
-                            bcx.ins().uextend(types::I64, add)
-                        };
+                        let val = bcx.ins().iadd(rn, neg);
 
-                        saver.store_register(rd, &mut bcx, val);
-
-                        let f = bcx.ins().iconst(types::I8, 0);
-
-                        // true if the value is negative
-                        let is_neg = if sf {
-                            bcx.ins().ushr_imm(val, 63)
-                        } else {
-                            bcx.ins().ushr_imm(val, 31)
-                        };
-
-                        let nt = bcx.ins().iconst(types::I8, N_MASK);
-                        let n = bcx.ins().select(is_neg, nt, f);
-                        saver.store_n(&mut bcx, n);
-
-                        let zt = bcx.ins().iconst(types::I8, Z_MASK);
-                        let z = bcx.ins().select(val, f, zt);
-                        saver.store_z(&mut bcx, z);
-
-                        // todo: optimize it
-                        let (is_c, is_v) = if sf {
-                            let imm = bcx.ins().iconst(types::I64, imm as i64);
-                            let (_, c) = bcx.ins().usub_overflow(rn, imm);
-                            let (_, v) = bcx.ins().ssub_overflow(rn, imm);
-
-                            (c, v)
-                        } else {
-                            let imm = bcx.ins().iconst(types::I32, imm as i64);
-                            let (_, c) = bcx.ins().usub_overflow(rn, imm);
-                            let (_, v) = bcx.ins().ssub_overflow(rn, imm);
-
-                            (c, v)
-                        };
-
-                        let ct = bcx.ins().iconst(types::I8, C_MASK);
-                        let c = bcx.ins().select(is_c, ct, f);
-                        saver.store_c(&mut bcx, c);
-
-                        let vt = bcx.ins().iconst(types::I8, V_MASK);
-                        let v = bcx.ins().select(is_v, vt, f);
-                        saver.store_v(&mut bcx, v);
+                        saver.store_register_with_sf(rd, &mut bcx, val, sf);
                     }
-                    ArmInst::Sub { rd, rn, imm, sf } => {
-                        let val = if sf {
-                            let rn = saver.load_register(rn, &mut bcx);
-                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
-                            add
-                        } else {
-                            let rn = saver.load_register32(rn, &mut bcx);
-                            let add = bcx.ins().iadd_imm(rn, -(imm as i64));
-                            bcx.ins().uextend(types::I64, add)
-                        };
+                    ArmInst::Subs { rd, rn, op2, sf } => {
+                        let rn = saver.load_register_with_sf(rn, &mut bcx, sf);
+                        let op2 = saver.load_operand(&mut bcx, op2, sf);
+                        let neg = bcx.ins().ineg(op2);
 
-                        saver.store_register(rd, &mut bcx, val);
+                        let val = bcx.ins().iadd(rn, neg);
+
+                        saver.store_register_with_sf(rd, &mut bcx, val, sf);
+
+                        saver.check_alu_pstate(&mut bcx, val, rn, op2, sf, |bcx, us, x, y| {
+                            if us {
+                                bcx.ins().usub_overflow(x, y).1
+                            } else {
+                                bcx.ins().ssub_overflow(x, y).1
+                            }
+                        });
                     }
                     ArmInst::Svc { imm } => {
                         ret.set_ty(InterruptType::Svc);
@@ -278,6 +187,11 @@ impl Translator {
                         break;
                     }
                     ArmInst::Nop => {
+                        let i = bcx.ins().iconst(types::I64, 0);
+                        let i2 = bcx.ins().iconst(types::I64, 1);
+                        let cin = bcx.ins().iconst(types::I8, 2);
+                        bcx.ins().iadd_carry(i, i2, cin);
+
                         bcx.ins().nop();
                     }
                     // ret will give a hint to cpu
@@ -407,6 +321,15 @@ impl RegisterSaver {
         }
     }
 
+    #[inline]
+    pub fn load_register_with_sf(&mut self, rn: u8, bcx: &mut FunctionBuilder, sf: bool) -> Value {
+        if sf {
+            self.load_register(rn, bcx)
+        } else {
+            self.load_register32(rn, bcx)
+        }
+    }
+
     pub fn load_register(&mut self, rn: u8, bcx: &mut FunctionBuilder) -> Value {
         let rds = rn as usize;
 
@@ -436,6 +359,50 @@ impl RegisterSaver {
             bcx.def_var(var, extended);
             self.gprs[rds] = true;
             val
+        }
+    }
+
+    pub fn load_operand(&mut self, bcx: &mut FunctionBuilder, operand: Operand, sf: bool) -> Value {
+        let ty = if sf { types::I64 } else { types::I32 };
+
+        match operand {
+            Operand::Imm(imm) => {
+                let imm = imm as i64;
+                bcx.ins().iconst(ty, imm)
+            }
+            Operand::ShiftedReg {
+                rm,
+                shift_type,
+                amount,
+            } => {
+                let amount = amount as i64;
+                let reg = if sf {
+                    self.load_register(rm, bcx)
+                } else {
+                    self.load_register32(rm, bcx)
+                };
+
+                match shift_type {
+                    ShiftType::Lsl => bcx.ins().ishl_imm(reg, amount),
+                    ShiftType::Lsr => bcx.ins().ushr_imm(reg, amount),
+                    ShiftType::Asr => bcx.ins().sshr_imm(reg, amount),
+                    ShiftType::Ror => bcx.ins().rotr_imm(reg, amount),
+                }
+            }
+        }
+    }
+
+    pub fn store_register_with_sf(
+        &mut self,
+        rn: u8,
+        bcx: &mut FunctionBuilder,
+        mut val: Value,
+        sf: bool,
+    ) {
+        if sf {
+            self.store_register(rn, bcx, val);
+        } else {
+            self.store_register32(rn, bcx, val);
         }
     }
 
@@ -664,6 +631,50 @@ impl RegisterSaver {
         bcx.def_var(var, n);
     }
 
+    pub fn check_alu_pstate(
+        &mut self,
+        bcx: &mut FunctionBuilder,
+        val: Value,
+        a: Value,
+        b: Value,
+        sf: bool,
+        mut checker: impl FnMut(&mut FunctionBuilder, bool, Value, Value) -> Value,
+    ) {
+        // todo: optimize it
+
+        let f = bcx.ins().iconst(types::I8, 0);
+        let t = bcx.ins().iconst(types::I8, 1);
+
+        // true if the value is negative
+        let is_neg = if sf {
+            bcx.ins().ushr_imm(val, 63)
+        } else {
+            bcx.ins().ushr_imm(val, 31)
+        };
+
+        let n = bcx.ins().ireduce(types::I8, is_neg);
+        self.store_n(bcx, n);
+
+        let z = bcx.ins().select(val, f, t);
+        self.store_z(bcx, z);
+
+        // todo: optimize it
+        let (c, v) = if sf {
+            let c = checker(bcx, true, a, b);
+            let v = checker(bcx, false, a, b);
+
+            (c, v)
+        } else {
+            let c = checker(bcx, true, a, b);
+            let v = checker(bcx, false, a, b);
+
+            (c, v)
+        };
+
+        self.store_c(bcx, c);
+        self.store_v(bcx, v);
+    }
+
     pub fn save_registers(self, bcx: &mut FunctionBuilder) {
         for (rd, gpr) in self.gprs.into_iter().enumerate() {
             if !gpr {
@@ -681,25 +692,34 @@ impl RegisterSaver {
 
         if let Some(pstate) = self.pstate {
             let mut var = bcx.use_var(Variable::from_u32(PSTATE_VAR));
+            let f = bcx.ins().iconst(types::I8, 0);
 
             if pstate.n {
                 let n = bcx.use_var(Variable::from_u32(N_VAR));
+                let mask = bcx.ins().iconst(types::I8, N_MASK);
+                let n = bcx.ins().select(n, mask, f);
                 var = bcx.ins().bor(var, n);
             }
 
             if pstate.z {
-                let z = bcx.use_var(Variable::from_u32(Z_VAR));
-                var = bcx.ins().bor(var, z);
+                let n = bcx.use_var(Variable::from_u32(Z_VAR));
+                let mask = bcx.ins().iconst(types::I8, Z_MASK);
+                let n = bcx.ins().select(n, mask, f);
+                var = bcx.ins().bor(var, n);
             }
 
             if pstate.c {
-                let c = bcx.use_var(Variable::from_u32(C_VAR));
-                var = bcx.ins().bor(var, c);
+                let n = bcx.use_var(Variable::from_u32(C_VAR));
+                let mask = bcx.ins().iconst(types::I8, C_MASK);
+                let n = bcx.ins().select(n, mask, f);
+                var = bcx.ins().bor(var, n);
             }
 
             if pstate.v {
-                let v = bcx.use_var(Variable::from_u32(V_VAR));
-                var = bcx.ins().bor(var, v);
+                let n = bcx.use_var(Variable::from_u32(V_VAR));
+                let mask = bcx.ins().iconst(types::I8, V_MASK);
+                let n = bcx.ins().select(n, mask, f);
+                var = bcx.ins().bor(var, n);
             }
 
             set_pstate(bcx, self.cpu_ctx, var);
@@ -808,8 +828,8 @@ fn set_pstate(bcx: &mut FunctionBuilder, cpu_context: Value, pstate: Value) {
 #[cfg(test)]
 mod tests {
     use crate::context::CpuContext;
-    use crate::inst::Inst;
-    use crate::translate::{ExecutionReturn, InterruptType, Translator, N_MASK};
+    use crate::inst::{Inst, Operand};
+    use crate::translate::{ExecutionReturn, InterruptType, Translator};
 
     #[test]
     fn gen() {
@@ -850,25 +870,25 @@ mod tests {
             Inst::Add {
                 rd: 0,
                 rn: 0,
-                imm: 12,
+                op2: Operand::imm(12),
                 sf: true,
             },
             Inst::Add {
                 rd: 8,
                 rn: 0,
-                imm: 16,
+                op2: Operand::imm(16),
                 sf: false,
             },
             Inst::Sub {
                 rd: 4,
                 rn: 8,
-                imm: 14,
+                op2: Operand::imm(14),
                 sf: true,
             },
             Inst::Sub {
                 rd: 16,
                 rn: 4,
-                imm: 6,
+                op2: Operand::imm(6),
                 sf: false,
             },
         ]);
@@ -903,25 +923,13 @@ mod tests {
             Inst::Add {
                 rd: 0,
                 rn: 0,
-                imm: u32::MAX as u32,
+                op2: Operand::imm(u32::MAX as u32),
                 sf: false,
             },
             Inst::Adds {
                 rd: 0,
                 rn: 0,
-                imm: 1,
-                sf: false,
-            },
-            Inst::Sub {
-                rd: 1,
-                rn: 1,
-                imm: i32::MAX as u32,
-                sf: false,
-            },
-            Inst::Subs {
-                rd: 1,
-                rn: 1,
-                imm: 1,
+                op2: Operand::imm(1),
                 sf: false,
             },
             Inst::Nop,

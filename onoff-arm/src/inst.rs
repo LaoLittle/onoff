@@ -24,13 +24,80 @@ pub enum Inst {
     /// `ADRP <Xd>, <label>`
     Adrp { rd: u8, label: i64 },
     /// `ADD <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
-    Add { rd: u8, rn: u8, imm: u32, sf: bool },
+    Add {
+        rd: u8,
+        rn: u8,
+        op2: Operand,
+        sf: bool,
+    },
     /// `ADDS <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
-    Adds { rd: u8, rn: u8, imm: u32, sf: bool },
+    /// `ADDS <Rd>, <Rn>, <Rm>{, <shift> #<amount>}`
+    Adds {
+        rd: u8,
+        rn: u8,
+        op2: Operand,
+        sf: bool,
+    },
     /// `SUB <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
-    Sub { rd: u8, rn: u8, imm: u32, sf: bool },
+    Sub {
+        rd: u8,
+        rn: u8,
+        op2: Operand,
+        sf: bool,
+    },
     /// `SUBS <Rd>, <Rn|RSP>, #<imm>{, <shift>}`
-    Subs { rd: u8, rn: u8, imm: u32, sf: bool },
+    Subs {
+        rd: u8,
+        rn: u8,
+        op2: Operand,
+        sf: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Operand {
+    Imm(u32),
+    ShiftedReg {
+        rm: u8,
+        shift_type: ShiftType,
+        amount: u8,
+    },
+}
+
+impl Operand {
+    #[inline]
+    pub const fn imm(imm: u32) -> Self {
+        Self::Imm(imm)
+    }
+
+    #[inline]
+    pub const fn reg(rm: u8) -> Self {
+        Self::shifted_reg(rm, ShiftType::Lsl, 0, true)
+    }
+
+    pub const fn shifted_reg(rm: u8, shift_type: ShiftType, amount: u8, sf: bool) -> Self {
+        assert!(rm < 32, "register number should be in [0, 32)");
+
+        if sf {
+            assert!(amount < 64, "shift amount should be less than 64!");
+        } else {
+            assert!(amount < 32, "shift amount should be less than 32!");
+        }
+
+        Self::ShiftedReg {
+            rm,
+            shift_type,
+            amount,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ShiftType {
+    Lsl,
+    Lsr,
+    Asr,
+    Ror,
 }
 
 pub struct InstDecoder<R> {
@@ -180,7 +247,7 @@ const fn decode_add_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Resul
     Ok(Inst::Add {
         rd: rd as u8,
         rn: rn as u8,
-        imm: if sh { imm << 12 } else { imm },
+        op2: Operand::imm(if sh { imm << 12 } else { imm }),
         sf,
     })
 }
@@ -189,7 +256,7 @@ const fn decode_sub_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Resul
     Ok(Inst::Sub {
         rd: rd as u8,
         rn: rn as u8,
-        imm: if sh { imm << 12 } else { imm },
+        op2: Operand::imm(if sh { imm << 12 } else { imm }),
         sf,
     })
 }
@@ -198,7 +265,7 @@ const fn decode_adds_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Resu
     Ok(Inst::Adds {
         rd: rd as u8,
         rn: rn as u8,
-        imm: if sh { imm << 12 } else { imm },
+        op2: Operand::imm(if sh { imm << 12 } else { imm }),
         sf,
     })
 }
@@ -207,7 +274,7 @@ const fn decode_subs_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Resu
     Ok(Inst::Subs {
         rd: rd as u8,
         rn: rn as u8,
-        imm: if sh { imm << 12 } else { imm },
+        op2: Operand::imm(if sh { imm << 12 } else { imm }),
         sf,
     })
 }
