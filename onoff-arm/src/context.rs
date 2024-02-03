@@ -73,77 +73,19 @@ impl Cpu {
         Ok(CpuStatus::from_u32(status))
     }
 
-    /*
-    pub fn execute(&mut self, steps: u32) -> Result<Option<Break>> {
-        for _ in 0..steps {
-            let pc = self.context.pc;
-            let inst = self.memory.read32(pc)?;
-            let bytes = inst.to_le_bytes();
-            let mut decoder = InstDecoder::new(bytes.as_slice());
-
-            match self.execute_single_inst(decoder.decode_inst()?) {
-                None => {}
-                Some(b) => return Ok(Some(b)),
-            }
-        }
-
-        Ok(None)
-    }
-
-     */
-
-    /*pub fn execute_single_inst(&mut self, inst: Inst) -> Option<Break> {
-        match inst {
-            Inst::B { label } => {
-                let pc = self.context.pc_mut();
-                *pc = pc.wrapping_add_signed(label).wrapping_sub(4);
-            }
-            Inst::Bl { label } => {
-                *self.context.lr_mut() = self.context.pc();
-                let pc = self.context.pc_mut();
-                *pc = pc.wrapping_add_signed(label).wrapping_sub(4);
-            }
-            Inst::Adr { rd, label } => {
-                let pc = self.context.pc();
-                let rd = self.context.gpr_mut(rd);
-                *rd = pc.wrapping_add_signed(label);
-            }
-            Inst::Adrp { rd, label } => {
-                let pc = self.context.pc();
-                let rd = self.context.gpr_mut(rd);
-                *rd = (pc & !4095).wrapping_add_signed(label);
-            }
-            _ => {},
-        }
-
-        self.context.pc += 4;
-
-        None
-    }
-
-     */
-
     #[inline]
     pub fn memory_mut(&mut self) -> &mut PageMemory {
         &mut self.memory
     }
 
-    pub fn check_cache(&mut self, addr: u64) {
-        let mut addrs = SmallVec::<u64, 16>::new();
-        for (&base, _) in self.code_cache.iter() {
-            if (base..base + 64 * 4).contains(&addr) {
-                addrs.push(base);
-            }
-        }
-
-        for addr in addrs {
-            self.code_cache.remove(&addr);
-        }
-    }
-
     #[inline]
     pub fn set_pc(&mut self, base: u64) {
         self.context.pc = base;
+    }
+
+    #[inline]
+    pub fn set_sp(&mut self, top: u64) {
+        *self.context.gpr_mut(REG_SP) = top;
     }
 
     #[inline]
@@ -161,7 +103,7 @@ impl Debug for Cpu {
 }
 
 #[derive(Debug)]
-#[repr(C)] // for jit purpose
+#[repr(C)]
 pub struct CpuContext {
     // general purpose registers
     pub gprs: [u64; 32],
@@ -182,14 +124,14 @@ pub enum Interrupt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CpuStatus {
     pub break_type: Option<Interrupt>,
-    pub val: Option<NonZeroU16>,
+    pub val: u16,
 }
 
 impl CpuStatus {
     pub fn normal() -> Self {
         Self {
             break_type: None,
-            val: None,
+            val: 0,
         }
     }
 
@@ -208,7 +150,7 @@ impl From<ExecutionReturn> for CpuStatus {
                 InterruptType::Udf => Some(Interrupt::Udf),
                 InterruptType::Svc => Some(Interrupt::Svc),
             },
-            val: NonZeroU16::new(ret.val()),
+            val: ret.val(),
         }
     }
 }
@@ -217,6 +159,8 @@ impl From<ExecutionReturn> for CpuStatus {
 pub const REG_FP: u8 = 29;
 pub const REG_LR: u8 = 30;
 pub const REG_SP: u8 = 31;
+
+pub const REG_ZR: u8 = 31;
 
 impl CpuContext {
     #[inline]

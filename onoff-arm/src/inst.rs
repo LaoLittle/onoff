@@ -52,6 +52,14 @@ pub enum Inst {
         op2: Operand,
         sf: bool,
     },
+    /// `ADC <Rd>, <Rn>, <Rm>`
+    Adc { rd: u8, rn: u8, rm: u8, sf: bool },
+    /// `ADCS <Rd>, <Rn>, <Rm>`
+    Adcs { rd: u8, rn: u8, rm: u8, sf: bool },
+    /// `SBC <Rd>, <Rn>, <Rm>`
+    Sbc { rd: u8, rn: u8, rm: u8, sf: bool },
+    /// `SBCS <Rd>, <Rn>, <Rm>`
+    Sbcs { rd: u8, rn: u8, rm: u8, sf: bool },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,10 +102,29 @@ impl Operand {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ShiftType {
-    Lsl,
-    Lsr,
-    Asr,
-    Ror,
+    /// Logical shift left
+    Lsl = 0b00,
+    /// Logical shift right
+    Lsr = 0b01,
+    /// Arithmetic shift right
+    Asr = 0b10,
+    /// Rotate right
+    Ror = 0b11,
+}
+
+impl ShiftType {
+    #[inline]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        use ShiftType::*;
+
+        Some(match value {
+            0b00 => Lsl,
+            0b01 => Lsr,
+            0b10 => Asr,
+            0b11 => Ror,
+            _ => return None,
+        })
+    }
 }
 
 pub struct InstDecoder<R> {
@@ -160,6 +187,7 @@ const fn unspported() -> Result<Inst> {
     Err(Error::NotSupported)
 }
 
+// The main decoding entry
 fn decode_inst_u32(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<29, 24>(inst);
 
@@ -170,6 +198,8 @@ fn decode_inst_u32(inst: u32) -> Result<Inst> {
         0b10000 | 0b10001 | 0b10010 | 0b10011 => decode_dp_imm(inst),
         // Branches, Exception Generating and System instructions
         0b10100 | 0b10101 | 0b10110 | 0b10111 => decode_bes(inst),
+        // Data Processing -- Register
+        0b01010 | 0b01011 | 0b11010 | 0b11011 => decode_dp_reg(inst),
         _ => unspported(),
     }
 }
@@ -190,7 +220,7 @@ const fn decode_udf(inst: u32) -> Result<Inst> {
     Ok(Inst::Udf { imm: imm as u16 })
 }
 
-// Data process, immediate
+// Data Processing -- Immediate
 const fn decode_dp_imm(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<26, 23>(inst);
 
@@ -366,6 +396,164 @@ const fn decode_ubr_imm(inst: u32) -> Result<Inst> {
         0b0 => Inst::B { label },
         0b1 => Inst::Bl { label },
         _ => unreachable!(),
+    })
+}
+
+// Data Processing -- Register
+const fn decode_dp_reg(inst: u32) -> Result<Inst> {
+    let op0 = extract_field::<31, 30>(inst);
+    let op1 = extract_field::<29, 28>(inst);
+    let op2 = extract_field::<25, 21>(inst);
+    let op3 = extract_field::<16, 10>(inst);
+
+    match (op1, op2) {
+        (0b0, 0b1000 | 0b1010 | 0b1100 | 0b1110) => decode_addsub_sreg(inst),
+        (0b1, 0b0000) if op3 == 0b000000 => decode_addsub_carry(inst),
+        _ => Err(Error::NotSupported),
+    }
+}
+
+const fn decode_addsub_sreg(inst: u32) -> Result<Inst> {
+    let sf = extract_field::<32, 31>(inst);
+    let op = extract_field::<31, 30>(inst);
+    let s = extract_field::<30, 29>(inst);
+    // shift
+    let sh = extract_field::<24, 22>(inst);
+    let rm = extract_field::<21, 16>(inst);
+    let imm6 = extract_field::<16, 10>(inst);
+    let rn = extract_field::<10, 5>(inst);
+    let rd = extract_field::<5, 0>(inst);
+
+    let sf = sf == 1;
+    let Some(sh) = ShiftType::from_u32(sh) else {
+        return Err(Error::NotSupported);
+    };
+
+    match (op, s) {
+        (0b0, 0b0) => decode_add_sreg(sf, sh, rm, imm6, rn, rd),
+        (0b1, 0b0) => decode_sub_sreg(sf, sh, rm, imm6, rn, rd),
+        (0b0, 0b1) => decode_adds_sreg(sf, sh, rm, imm6, rn, rd),
+        (0b1, 0b1) => decode_subs_sreg(sf, sh, rm, imm6, rn, rd),
+        _ => unreachable!(),
+    }
+}
+
+const fn decode_addsub_carry(inst: u32) -> Result<Inst> {
+    let sf = extract_field::<32, 31>(inst);
+    let op = extract_field::<31, 30>(inst);
+    let s = extract_field::<30, 29>(inst);
+    let rm = extract_field::<21, 16>(inst);
+    let rn = extract_field::<10, 9>(inst);
+    let rd = extract_field::<5, 0>(inst);
+
+    let sf = sf == 1;
+
+    match (op, s) {
+        (0b0, 0b0) => decode_adc(sf, rm, rn, rd),
+        (0b1, 0b0) => decode_sbc(sf, rm, rn, rd),
+        (0b0, 0b1) => decode_adcs(sf, rm, rn, rd),
+        (0b1, 0b1) => decode_sbcs(sf, rm, rn, rd),
+        _ => unreachable!(),
+    }
+}
+
+const fn decode_adc(sf: bool, rm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Adc {
+        rd: rd as u8,
+        rn: rn as u8,
+        rm: rm as u8,
+        sf,
+    })
+}
+
+const fn decode_sbc(sf: bool, rm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Sbc {
+        rd: rd as u8,
+        rn: rn as u8,
+        rm: rm as u8,
+        sf,
+    })
+}
+
+const fn decode_adcs(sf: bool, rm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Adcs {
+        rd: rd as u8,
+        rn: rn as u8,
+        rm: rm as u8,
+        sf,
+    })
+}
+
+const fn decode_sbcs(sf: bool, rm: u32, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Sbcs {
+        rd: rd as u8,
+        rn: rn as u8,
+        rm: rm as u8,
+        sf,
+    })
+}
+
+const fn decode_add_sreg(
+    sf: bool,
+    sh: ShiftType,
+    rm: u32,
+    imm: u32,
+    rn: u32,
+    rd: u32,
+) -> Result<Inst> {
+    Ok(Inst::Add {
+        rd: rd as u8,
+        rn: rn as u8,
+        op2: Operand::shifted_reg(rm as u8, sh, imm as u8, sf),
+        sf,
+    })
+}
+
+const fn decode_sub_sreg(
+    sf: bool,
+    sh: ShiftType,
+    rm: u32,
+    imm: u32,
+    rn: u32,
+    rd: u32,
+) -> Result<Inst> {
+    Ok(Inst::Sub {
+        rd: rd as u8,
+        rn: rn as u8,
+        op2: Operand::shifted_reg(rm as u8, sh, imm as u8, sf),
+        sf,
+    })
+}
+
+const fn decode_adds_sreg(
+    sf: bool,
+    sh: ShiftType,
+    rm: u32,
+    imm: u32,
+    rn: u32,
+    rd: u32,
+) -> Result<Inst> {
+    Ok(Inst::Adds {
+        rd: rd as u8,
+        rn: rn as u8,
+        op2: Operand::shifted_reg(rm as u8, sh, imm as u8, sf),
+        sf,
+    })
+}
+
+const fn decode_subs_sreg(
+    sf: bool,
+    sh: ShiftType,
+    rm: u32,
+    imm: u32,
+    rn: u32,
+    rd: u32,
+) -> Result<Inst> {
+    Ok(Inst::Subs {
+        rd: rd as u8,
+        rn: rn as u8,
+        op2: Operand::shifted_reg(rm as u8, sh, imm as u8, sf),
+        sf,
     })
 }
 
