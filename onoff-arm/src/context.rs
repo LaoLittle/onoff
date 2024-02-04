@@ -318,19 +318,3 @@ mod tests {
         drop(stack);
     }
 }
-
-#[test]
-fn test() {
-    let mut stack = [0u8; 16];
-
-    let a = 12u64;
-    unsafe {
-        std::arch::asm!(
-        "str {0}, [{1}]",
-        in(reg) a,
-        in(reg) stack.as_mut_ptr()
-        );
-    }
-
-    println!("{:?}", stack);
-}
