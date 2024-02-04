@@ -1,5 +1,5 @@
 use crate::context::{CpuContext, REG_LR};
-use crate::inst::{Inst as ArmInst, Operand, ShiftType};
+use crate::inst::{Condition, Inst as ArmInst, Inst, Operand, ShiftType};
 use cranelift::codegen::ir::UserFuncName;
 use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -281,6 +281,14 @@ impl Translator {
                             },
                         );
                     }
+                    ArmInst::Movz { rd, imm, shift, sf } => {
+                        let result = (imm as u64) << shift;
+                        let result = bcx
+                            .ins()
+                            .iconst(RegisterSaver::type_with_sf(sf), result as i64);
+
+                        saver.store_register_with_sf(rd, &mut bcx, result, sf);
+                    }
                     ArmInst::Svc { imm } => {
                         ret.set_ty(InterruptType::Svc);
                         ret.set_val(imm);
@@ -288,11 +296,6 @@ impl Translator {
                         break;
                     }
                     ArmInst::Nop => {
-                        let i = bcx.ins().iconst(types::I64, 0);
-                        let i2 = bcx.ins().iconst(types::I64, 1);
-                        let cin = bcx.ins().iconst(types::I8, 2);
-                        bcx.ins().iadd_carry(i, i2, cin);
-
                         bcx.ins().nop();
                     }
                     // ret will give a hint to cpu
@@ -327,6 +330,151 @@ impl Translator {
 
                         let dest = bcx.ins().iadd_imm(pc, label);
                         saver.store_pc(&mut bcx, dest);
+
+                        save_pc = false;
+
+                        break;
+                    }
+                    Inst::Strb {
+                        rt,
+                        rn,
+                        offset,
+                        wback,
+                        postindex,
+                    } => {
+                        todo!()
+                    }
+                    Inst::Strh { .. } => {
+                        todo!()
+                    }
+                    Inst::Str {
+                        rt,
+                        rn,
+                        offset,
+                        wback,
+                        postindex,
+                        sf,
+                    } => {
+                        let mut addr = saver.load_register(rn, &mut bcx);
+                        let mut acc_off = 0;
+
+                        if !postindex {
+                            acc_off = offset as i32;
+                        }
+
+                        let data = if rt == 31 {
+                            saver.load_zr(&mut bcx, sf)
+                        } else {
+                            saver.load_register_with_sf(rt, &mut bcx, sf)
+                        };
+
+                        bcx.ins().store(MemFlags::trusted(), data, addr, acc_off);
+
+                        if wback {
+                            if postindex {
+                                addr = bcx.ins().iadd_imm(addr, offset);
+                            }
+
+                            saver.store_register(rn, &mut bcx, addr);
+                        }
+                    }
+                    Inst::Ldrb { .. } => todo!(),
+                    Inst::Ldrh { .. } => todo!(),
+                    Inst::Ldr {
+                        rt,
+                        rn,
+                        offset,
+                        wback,
+                        postindex,
+                        sf,
+                    } => {
+                        let mut addr = saver.load_register(rn, &mut bcx);
+                        let mut acc_off = 0;
+
+                        if !postindex {
+                            acc_off = offset as i32;
+                        }
+
+                        let data = bcx.ins().load(
+                            RegisterSaver::type_with_sf(sf),
+                            MemFlags::trusted(),
+                            addr,
+                            acc_off,
+                        );
+                        saver.store_register_with_sf(rt, &mut bcx, data, sf);
+
+                        if wback {
+                            if postindex {
+                                addr = bcx.ins().iadd_imm(addr, offset);
+                            }
+
+                            saver.store_register(rn, &mut bcx, addr);
+                        }
+                    }
+                    Inst::Csinc {
+                        rd,
+                        rn,
+                        rm,
+                        cond,
+                        sf,
+                    } => {
+                        let op1 = if rn == 31 {
+                            saver.load_zr(&mut bcx, sf)
+                        } else {
+                            saver.load_register_with_sf(rn, &mut bcx, sf)
+                        };
+                        let op2 = if rm == 31 {
+                            saver.load_zr(&mut bcx, sf)
+                        } else {
+                            saver.load_register_with_sf(rm, &mut bcx, sf)
+                        };
+                        let op2 = bcx.ins().iadd_imm(op2, 1);
+
+                        let cond = saver.load_cond(&mut bcx, cond);
+
+                        let result = bcx.ins().select(cond, op1, op2);
+
+                        saver.store_register_with_sf(rd, &mut bcx, result, sf);
+                    }
+                    Inst::Tbz {
+                        rt,
+                        bit_pos,
+                        offset,
+                        sf,
+                    } => {
+                        let mask = 0b1 << bit_pos;
+                        let rt = saver.load_register_with_sf(rt, &mut bcx, sf);
+
+                        let pc = saver.load_pc(&mut bcx);
+                        let t = bcx.ins().iadd_imm(pc, 4);
+                        let f = bcx.ins().iadd_imm(pc, offset);
+
+                        let bit = bcx.ins().band_imm(rt, mask);
+
+                        let target = bcx.ins().select(bit, t, f);
+                        saver.store_pc(&mut bcx, target);
+
+                        save_pc = false;
+
+                        break;
+                    }
+                    Inst::Tbnz {
+                        rt,
+                        bit_pos,
+                        offset,
+                        sf,
+                    } => {
+                        let mask = 0b1 << bit_pos;
+                        let rt = saver.load_register_with_sf(rt, &mut bcx, sf);
+
+                        let pc = saver.load_pc(&mut bcx);
+                        let t = bcx.ins().iadd_imm(pc, offset);
+                        let f = bcx.ins().iadd_imm(pc, 4);
+
+                        let bit = bcx.ins().band_imm(rt, mask);
+
+                        let target = bcx.ins().select(bit, t, f);
+                        saver.store_pc(&mut bcx, target);
 
                         save_pc = false;
 
@@ -717,6 +865,92 @@ impl RegisterSaver {
         }
     }
 
+    pub fn load_cond(&mut self, bcx: &mut FunctionBuilder, cond: Condition) -> Value {
+        use Condition::*;
+
+        match cond {
+            Eq => self.load_z(bcx),
+            Ne => {
+                let cond = self.load_z(bcx);
+                utils::is_zero(bcx, cond)
+            }
+            Cs => self.load_c(bcx),
+            Cc => {
+                let cond = self.load_c(bcx);
+                utils::is_zero(bcx, cond)
+            }
+            Mi => self.load_n(bcx),
+            Pl => {
+                let cond = self.load_n(bcx);
+                utils::is_zero(bcx, cond)
+            }
+            Vs => self.load_v(bcx),
+            Vc => {
+                let cond = self.load_v(bcx);
+                utils::is_zero(bcx, cond)
+            }
+            Hi => {
+                let c = self.load_c(bcx);
+                let z = self.load_z(bcx);
+                let z = utils::is_zero(bcx, z);
+                bcx.ins().band(c, z)
+            }
+            Ls => {
+                let cond = {
+                    let c = self.load_c(bcx);
+                    let z = self.load_z(bcx);
+                    let z = utils::is_zero(bcx, z);
+                    bcx.ins().band(c, z)
+                };
+
+                utils::is_zero(bcx, cond)
+            }
+            Ge => {
+                let n = self.load_n(bcx);
+                let v = self.load_v(bcx);
+
+                utils::is_eq(bcx, n, v)
+            }
+            Lt => {
+                let n = self.load_n(bcx);
+                let v = self.load_v(bcx);
+
+                utils::is_neq(bcx, n, v)
+            }
+            Gt => {
+                let c0 = {
+                    let n = self.load_n(bcx);
+                    let v = self.load_v(bcx);
+
+                    utils::is_eq(bcx, n, v)
+                };
+
+                let z = self.load_z(bcx);
+                let z = utils::is_zero(bcx, z);
+
+                bcx.ins().band(c0, z)
+            }
+            Le => {
+                let cond = {
+                    let c0 = {
+                        let n = self.load_n(bcx);
+                        let v = self.load_v(bcx);
+
+                        utils::is_eq(bcx, n, v)
+                    };
+
+                    let z = self.load_z(bcx);
+                    let z = utils::is_zero(bcx, z);
+
+                    bcx.ins().band(c0, z)
+                };
+
+                utils::is_zero(bcx, cond)
+            }
+            Al => bcx.ins().iconst(types::I8, 1),
+        }
+    }
+
     pub fn check_alu_pstate(
         &mut self,
         bcx: &mut FunctionBuilder,
@@ -845,9 +1079,7 @@ fn get_register(bcx: &mut FunctionBuilder, cpu_context: Value, rn: u8) -> Value 
 
 fn get_register32(bcx: &mut FunctionBuilder, cpu_context: Value, rn: u8) -> Value {
     let rd = rn as usize;
-    let offset = memoffset::offset_of!(CpuContext, gprs)
-        + (core::mem::size_of::<u64>() * rd)
-        + core::mem::size_of::<u32>();
+    let offset = memoffset::offset_of!(CpuContext, gprs) + (core::mem::size_of::<u64>() * rd);
 
     bcx.ins().load(
         types::I32,
@@ -871,9 +1103,7 @@ fn set_register(bcx: &mut FunctionBuilder, cpu_context: Value, val: Value, rn: u
 
 fn set_register32(bcx: &mut FunctionBuilder, cpu_context: Value, val: Value, rn: u8) {
     let rd = rn as usize;
-    let offset = memoffset::offset_of!(CpuContext, gprs)
-        + (core::mem::size_of::<u64>() * rd)
-        + core::mem::size_of::<u32>();
+    let offset = memoffset::offset_of!(CpuContext, gprs) + (core::mem::size_of::<u64>() * rd);
 
     bcx.ins().store(
         MemFlags::trusted(),
@@ -941,6 +1171,14 @@ mod utils {
     pub fn is_zero(bcx: &mut FunctionBuilder, val: Value) -> Value {
         // val == 0
         bcx.ins().icmp_imm(IntCC::Equal, val, 0)
+    }
+
+    pub fn is_eq(bcx: &mut FunctionBuilder, a: Value, b: Value) -> Value {
+        bcx.ins().icmp(IntCC::Equal, a, b)
+    }
+
+    pub fn is_neq(bcx: &mut FunctionBuilder, a: Value, b: Value) -> Value {
+        bcx.ins().icmp(IntCC::NotEqual, a, b)
     }
 }
 
@@ -1021,13 +1259,15 @@ mod external {
 
 #[cfg(test)]
 mod tests {
-    use crate::context::CpuContext;
+    use crate::context::{CpuContext, REG_SP};
+    use crate::inst::Operand::Imm;
     use crate::inst::ShiftType;
     use crate::inst::{
         Inst::{self, *},
         Operand,
     };
     use crate::translate::{ExecutionReturn, InterruptType, Translator};
+    use core::slice;
 
     #[test]
     fn test_general() {
@@ -1387,6 +1627,32 @@ mod tests {
                 assert_eq!(cx.gprs[0], 114 - 2 - 1);
             },
         );
+    }
+
+    #[test]
+    fn test_mem() {
+        let mut stack = Box::new([1u8; 16]);
+
+        let mut ctx = CpuContext::new();
+        *ctx.gpr_mut(8) = 114;
+        *ctx.gpr_mut(REG_SP) = stack.as_ptr() as u64;
+
+        run_codegen_test(
+            &[Str {
+                rt: 8,
+                rn: 31,
+                offset: 4,
+                wback: false,
+                postindex: false,
+                sf: false,
+            }],
+            ctx,
+            |cx, _| {
+                println!("{:?}", stack);
+            },
+        );
+
+        drop(stack);
     }
 
     fn run_codegen_test(

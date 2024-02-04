@@ -2,7 +2,7 @@ use crate::inst::{Inst, InstDecoder};
 use crate::mem::{Memory, PageMemory};
 use crate::translate::{BlockAbi, ExecutionReturn, InterruptType, Translator};
 use lru::LruCache;
-use onoff_core::error::Result;
+use onoff_core::error::{Error, Result};
 use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
@@ -57,7 +57,13 @@ impl Cpu {
             let mem = mem.to_le_bytes();
 
             let mut decoder = InstDecoder::new(mem.as_slice());
-            let inst = decoder.decode_inst()?;
+            let Ok(inst) = decoder.decode_inst() else {
+                if i == 0 {
+                    return Err(Error::NotSupported);
+                }
+
+                break;
+            };
 
             v.push(inst);
         }
@@ -79,6 +85,16 @@ impl Cpu {
     }
 
     #[inline]
+    pub const fn pc(&self) -> u64 {
+        self.context.pc()
+    }
+
+    #[inline]
+    pub const fn lr(&self) -> u64 {
+        self.context.lr()
+    }
+
+    #[inline]
     pub fn set_pc(&mut self, base: u64) {
         self.context.pc = base;
     }
@@ -88,9 +104,18 @@ impl Cpu {
         *self.context.gpr_mut(REG_SP) = top;
     }
 
+    pub fn set_lr(&mut self, base: u64) {
+        *self.context.lr_mut() = base;
+    }
+
     #[inline]
     pub fn context(&self) -> &CpuContext {
         &self.context
+    }
+
+    #[inline]
+    pub fn set_debug(&mut self, debug: bool) {
+        self.translator.set_debug(debug);
     }
 }
 
@@ -179,12 +204,12 @@ impl CpuContext {
     }
 
     #[inline]
-    pub fn fp(&self) -> u64 {
+    pub const fn fp(&self) -> u64 {
         self.gprs[29]
     }
 
     #[inline]
-    pub fn lr(&self) -> u64 {
+    pub const fn lr(&self) -> u64 {
         self.gprs[30]
     }
 
@@ -194,12 +219,12 @@ impl CpuContext {
     }
 
     #[inline]
-    pub fn sp(&self) -> u64 {
+    pub const fn sp(&self) -> u64 {
         self.gprs[31]
     }
 
     #[inline]
-    pub fn pc(&self) -> u64 {
+    pub const fn pc(&self) -> u64 {
         self.pc
     }
 
@@ -243,4 +268,69 @@ mod tests {
         assert_eq!(cpu.context().gprs[0], 0x10000 + 12);
         assert_eq!(cpu.context().pc(), 0x10000 + 4 + 4);
     }
+
+    #[test]
+    fn test_out() {
+        // int main() {
+        //  int ab = 1;
+        //
+        //  for (int i = 0; i < 10; i++) {
+        //       ab += ab;
+        //  }
+        //
+        //  return ab;
+        // }
+
+        const STACK_SIZE: usize = 64;
+        let mut stack = Box::new([1u8; STACK_SIZE]);
+        let mem = [
+            0xff, 0x43, 0x00, 0xd1, 0xff, 0x0f, 0x00, 0xb9, 0x28, 0x00, 0x80, 0x52, 0xe8, 0x0b,
+            0x00, 0xb9, 0xff, 0x07, 0x00, 0xb9, 0x01, 0x00, 0x00, 0x14, 0xe8, 0x07, 0x40, 0xb9,
+            0x08, 0x29, 0x00, 0x71, 0xe8, 0xb7, 0x9f, 0x1a, 0x68, 0x01, 0x00, 0x37, 0x01, 0x00,
+            0x00, 0x14, 0xe9, 0x0b, 0x40, 0xb9, 0xe8, 0x0b, 0x40, 0xb9, 0x08, 0x01, 0x09, 0x0b,
+            0xe8, 0x0b, 0x00, 0xb9, 0x01, 0x00, 0x00, 0x14, 0xe8, 0x07, 0x40, 0xb9, 0x08, 0x05,
+            0x00, 0x11, 0xe8, 0x07, 0x00, 0xb9, 0xf3, 0xff, 0xff, 0x17, 0xe0, 0x0b, 0x40, 0xb9,
+            0xff, 0x43, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00,
+            0x00, 0x00,
+        ];
+
+        let mut cpu = Cpu::new();
+
+        cpu.set_debug(true);
+        cpu.memory_mut().write_exact(&mem, 0x10000).unwrap();
+
+        cpu.set_pc(0x10000);
+        cpu.set_sp(unsafe { stack.as_mut_ptr().byte_add(STACK_SIZE) as u64 });
+
+        *cpu.context.lr_mut() = 114514;
+
+        loop {
+            let _ = cpu.execute::<16>().unwrap();
+
+            // returned
+            if cpu.pc() == 114514 {
+                break;
+            }
+        }
+
+        assert_eq!(cpu.context().gprs[0], 1024);
+
+        drop(stack);
+    }
+}
+
+#[test]
+fn test() {
+    let mut stack = [0u8; 16];
+
+    let a = 12u64;
+    unsafe {
+        std::arch::asm!(
+        "str {0}, [{1}]",
+        in(reg) a,
+        in(reg) stack.as_mut_ptr()
+        );
+    }
+
+    println!("{:?}", stack);
 }

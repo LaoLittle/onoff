@@ -19,6 +19,68 @@ pub enum Inst {
     B { label: i64 },
     /// `BL <label>`
     Bl { label: i64 },
+    Tbz {
+        rt: u8,
+        bit_pos: u8,
+        offset: i64,
+        sf: bool,
+    },
+    Tbnz {
+        rt: u8,
+        bit_pos: u8,
+        offset: i64,
+        sf: bool,
+    },
+    /// `STRB <Rt>, [<Rn|SP>], #<simm>`
+    Strb {
+        rt: u8,
+        rn: u8,
+        offset: i64,
+        wback: bool,
+        postindex: bool,
+    },
+    /// `STRH <Rt>, [<Rn|SP>], #<simm>`
+    Strh {
+        rt: u8,
+        rn: u8,
+        offset: i64,
+        wback: bool,
+        postindex: bool,
+    },
+    /// `STR <Rt>, [<Rn|SP>], #<simm>`
+    Str {
+        rt: u8,
+        rn: u8,
+        offset: i64,
+        wback: bool,
+        postindex: bool,
+        sf: bool,
+    },
+    /// `STRB <Rt>, [<Rn|SP>], #<simm>`
+    Ldrb {
+        rt: u8,
+        rn: u8,
+        offset: i64,
+        wback: bool,
+        postindex: bool,
+    },
+    /// `STRH <Rt>, [<Rn|SP>], #<simm>`
+    Ldrh {
+        rt: u8,
+        rn: u8,
+        offset: i64,
+        wback: bool,
+        postindex: bool,
+    },
+    /// `STR <Rt>, [<Rn|SP>], #<simm>`
+    Ldr {
+        rt: u8,
+        rn: u8,
+        offset: i64,
+        wback: bool,
+        postindex: bool,
+        sf: bool,
+    },
     /// `ADR <Xd>, <label>`
     Adr { rd: u8, label: i64 },
     /// `ADRP <Xd>, <label>`
@@ -60,6 +122,20 @@ pub enum Inst {
     Sbc { rd: u8, rn: u8, rm: u8, sf: bool },
     /// `SBCS <Rd>, <Rn>, <Rm>`
     Sbcs { rd: u8, rn: u8, rm: u8, sf: bool },
+    Movz {
+        rd: u8,
+        imm: u16,
+        shift: u8,
+        sf: bool,
+    },
+    /// `CSINC <Rd>, <Rn>, <Rm>, <cond>`
+    Csinc {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        cond: Condition,
+        sf: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -70,6 +146,92 @@ pub enum Operand {
         shift_type: ShiftType,
         amount: u8,
     },
+}
+
+#[derive(Debug, Copy, Clone)]
+pub enum Condition {
+    /// Equal
+    Eq,
+    /// Not Equal
+    Ne,
+    /// Unsigned Higher or Same (or Carry Set)
+    Cs,
+    /// Unsigned Lower (or Carry Clear)
+    Cc,
+    /// Negative (or Minus)
+    Mi,
+    /// Positive (or Plus)
+    Pl,
+    /// Signed Overflow
+    Vs,
+    /// No signed Overflow
+    Vc,
+    /// Unsigned Higher
+    Hi,
+    /// Unsigned Lower or same
+    Ls,
+    /// Signed Greater Than or Equal
+    Ge,
+    /// Signed Less Than
+    Lt,
+    /// Signed Greater Than
+    Gt,
+    /// Signed Less Than or Equal
+    Le,
+    /// Always executed
+    Al,
+}
+
+impl Condition {
+    #[inline]
+    pub const fn from_code(code: u32) -> Self {
+        use Condition::*;
+        assert!(code <= 0b1111);
+        if code == 0b1111 {
+            return Self::Al;
+        }
+
+        let cond = extract_field::<4, 1>(code);
+        let rev = extract_field::<1, 0>(code);
+        let cond = match cond {
+            0b000 => Eq,
+            0b001 => Cs,
+            0b010 => Mi,
+            0b011 => Vs,
+            0b100 => Hi,
+            0b101 => Ge,
+            0b110 => Gt,
+            0b111 => Al,
+            _ => unreachable!(),
+        };
+
+        if rev == 0 {
+            cond
+        } else {
+            cond.rev()
+        }
+    }
+
+    #[inline]
+    pub const fn rev(self) -> Self {
+        match self {
+            Condition::Eq => Self::Ne,
+            Condition::Ne => Self::Eq,
+            Condition::Cs => Self::Cc,
+            Condition::Cc => Self::Cs,
+            Condition::Mi => Self::Pl,
+            Condition::Pl => Self::Mi,
+            Condition::Vs => Self::Vc,
+            Condition::Vc => Self::Vs,
+            Condition::Hi => Self::Ls,
+            Condition::Ls => Self::Hi,
+            Condition::Ge => Self::Lt,
+            Condition::Lt => Self::Ge,
+            Condition::Gt => Self::Le,
+            Condition::Le => Self::Gt,
+            Condition::Al => Self::Al,
+        }
+    }
 }
 
 impl Operand {
@@ -198,6 +360,10 @@ fn decode_inst_u32(inst: u32) -> Result<Inst> {
         0b10000 | 0b10001 | 0b10010 | 0b10011 => decode_dp_imm(inst),
         // Branches, Exception Generating and System instructions
         0b10100 | 0b10101 | 0b10110 | 0b10111 => decode_bes(inst),
+        // Loads and Stores
+        0b01000 | 0b01001 | 0b01100 | 0b01101 | 0b11000 | 0b11001 | 0b11100 | 0b11101 => {
+            decode_ldst(inst)
+        }
         // Data Processing -- Register
         0b01010 | 0b01011 | 0b11010 | 0b11011 => decode_dp_reg(inst),
         _ => unspported(),
@@ -227,8 +393,31 @@ const fn decode_dp_imm(inst: u32) -> Result<Inst> {
     match op0 {
         0b000 | 0b001 => decode_pc_rel(inst),
         0b010 => decode_addsub_imm(inst),
+        0b101 => decode_movw_imm(inst),
         _ => unspported(),
     }
+}
+
+const fn decode_movw_imm(inst: u32) -> Result<Inst> {
+    let sf = extract_field::<32, 31>(inst);
+    let opc = extract_field::<31, 29>(inst);
+    let hw = extract_field::<23, 21>(inst);
+    let imm16 = extract_field::<21, 5>(inst);
+    let rd = extract_field::<5, 0>(inst);
+
+    if matches!((sf, hw), (0b0, 0b10 | 0b11)) {
+        return Err(Error::NotSupported);
+    }
+
+    let sf = sf == 1;
+    let shift = (hw << 4) as u8;
+    let rd = rd as u8;
+    let imm = imm16 as u16;
+
+    Ok(match opc {
+        0b10 => Inst::Movz { rd, imm, shift, sf },
+        _ => todo!(),
+    })
 }
 
 const fn decode_pc_rel(inst: u32) -> Result<Inst> {
@@ -310,7 +499,7 @@ const fn decode_subs_imm(sf: bool, sh: bool, imm: u32, rn: u32, rd: u32) -> Resu
 }
 
 // Branch, Exception Generating and System
-const fn decode_bes(inst: u32) -> Result<Inst> {
+fn decode_bes(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<32, 29>(inst);
     let op1 = extract_field::<26, 12>(inst);
     let op2 = extract_field::<5, 0>(inst);
@@ -324,8 +513,181 @@ const fn decode_bes(inst: u32) -> Result<Inst> {
         (0b110, 0b01000000110010) if op2 == 0b11111 => decode_hints(inst), // hints
         (0b110, _) if op1_f == 0b1 => decode_ubr_reg(inst),
         (0b000 | 0b100, _) => decode_ubr_imm(inst),
+        (0b001 | 0b101, _) if op1_f == 0b1 => decode_test_br(inst),
         _ => Err(Error::NotSupported),
     }
+}
+
+fn decode_test_br(inst: u32) -> Result<Inst> {
+    let b5 = extract_field::<32, 31>(inst);
+    let op = extract_field::<25, 24>(inst);
+    let b40 = extract_field::<24, 19>(inst);
+    let imm14 = extract_field::<19, 5>(inst);
+    let rt = extract_field::<5, 0>(inst);
+    let rt = rt as u8;
+
+    let bit_pos = ((b5 << 6) | b40) as u8;
+    let offset = sign_extend_64::<14>(imm14) * 4;
+
+    let sf = b5 == 1;
+
+    Ok(match op {
+        0b0 => Inst::Tbz {
+            rt,
+            bit_pos,
+            offset,
+            sf,
+        },
+        0b1 => Inst::Tbnz {
+            rt,
+            bit_pos,
+            offset,
+            sf,
+        },
+        _ => unreachable!(),
+    })
+}
+
+fn decode_ldst(inst: u32) -> Result<Inst> {
+    let op0 = extract_field::<32, 28>(inst);
+    let op1 = extract_field::<27, 26>(inst);
+    let op2 = extract_field::<25, 23>(inst);
+    let op3 = extract_field::<22, 16>(inst);
+    let op4 = extract_field::<12, 10>(inst);
+
+    match (op0, op2) {
+        (0b0011 | 0b0111 | 0b1011 | 0b1111, 0b00 | 0b01) => todo!(),
+        (0b0011 | 0b0111 | 0b1011 | 0b1111, 0b10 | 0b11) => decode_ldst_uimm(inst),
+        _ => Err(Error::NotSupported),
+    }
+}
+
+fn decode_ldst_uimm(inst: u32) -> Result<Inst> {
+    let size = extract_field::<32, 30>(inst);
+    let v = extract_field::<27, 26>(inst);
+    let opc = extract_field::<24, 22>(inst);
+    let imm12 = extract_field::<22, 10>(inst);
+    let imm9 = extract_field::<21, 12>(inst);
+    let rn = extract_field::<10, 5>(inst);
+    let rt = extract_field::<5, 0>(inst);
+
+    match (opc, v) {
+        (0b00, 0b0) => decode_str_group(rt, rn, imm12, false, false, size),
+        (0b01, 0b0) => decode_ldr_group(rt, rn, imm12, false, false, size),
+        _ => Err(Error::NotSupported),
+    }
+}
+
+// strb, strh, str
+const fn decode_str_group(
+    rt: u32,
+    rn: u32,
+    imm: u32,
+    wback: bool,
+    postindex: bool,
+    size: u32,
+) -> Result<Inst> {
+    let rt = rt as u8;
+    let rn = rn as u8;
+    let offset = if wback {
+        sign_extend_64::<9>(imm)
+    } else {
+        imm as i64
+    };
+
+    let offset = offset << size;
+
+    let inst = match size {
+        0b00 => Inst::Strb {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+        },
+        0b01 => Inst::Strh {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+        },
+        0b10 => Inst::Str {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+            sf: false,
+        },
+        0b11 => Inst::Str {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+            sf: true,
+        },
+        _ => unreachable!(),
+    };
+
+    Ok(inst)
+}
+
+// ldrb, ldrh, ldr
+const fn decode_ldr_group(
+    rt: u32,
+    rn: u32,
+    imm: u32,
+    wback: bool,
+    postindex: bool,
+    size: u32,
+) -> Result<Inst> {
+    let rt = rt as u8;
+    let rn = rn as u8;
+    let offset = if wback {
+        sign_extend_64::<9>(imm)
+    } else {
+        imm as i64
+    };
+
+    let offset = offset << size;
+
+    let inst = match size {
+        0b00 => Inst::Ldrb {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+        },
+        0b01 => Inst::Ldrh {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+        },
+        0b10 => Inst::Ldr {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+            sf: false,
+        },
+        0b11 => Inst::Ldr {
+            rt,
+            rn,
+            offset,
+            wback,
+            postindex,
+            sf: true,
+        },
+        _ => unreachable!(),
+    };
+
+    Ok(inst)
 }
 
 // Exception generation
@@ -400,7 +762,7 @@ const fn decode_ubr_imm(inst: u32) -> Result<Inst> {
 }
 
 // Data Processing -- Register
-const fn decode_dp_reg(inst: u32) -> Result<Inst> {
+fn decode_dp_reg(inst: u32) -> Result<Inst> {
     let op0 = extract_field::<31, 30>(inst);
     let op1 = extract_field::<29, 28>(inst);
     let op2 = extract_field::<25, 21>(inst);
@@ -409,6 +771,7 @@ const fn decode_dp_reg(inst: u32) -> Result<Inst> {
     match (op1, op2) {
         (0b0, 0b1000 | 0b1010 | 0b1100 | 0b1110) => decode_addsub_sreg(inst),
         (0b1, 0b0000) if op3 == 0b000000 => decode_addsub_carry(inst),
+        (0b1, 0b0100) => decode_cselect(inst),
         _ => Err(Error::NotSupported),
     }
 }
@@ -455,6 +818,39 @@ const fn decode_addsub_carry(inst: u32) -> Result<Inst> {
         (0b1, 0b1) => decode_sbcs(sf, rm, rn, rd),
         _ => unreachable!(),
     }
+}
+
+const fn decode_cselect(inst: u32) -> Result<Inst> {
+    let sf = extract_field::<32, 31>(inst);
+    let op = extract_field::<31, 30>(inst);
+    let s = extract_field::<30, 29>(inst);
+    let rm = extract_field::<21, 16>(inst);
+    let cond = extract_field::<16, 12>(inst);
+    let op2 = extract_field::<12, 10>(inst);
+    let rn = extract_field::<10, 5>(inst);
+    let rd = extract_field::<5, 0>(inst);
+
+    let sf = sf == 1;
+    let cond = Condition::from_code(cond);
+
+    if s == 1 {
+        return Err(Error::NotSupported);
+    }
+
+    match (op, op2) {
+        (0b0, 0b01) => decode_csinc(sf, rm, cond, rn, rd),
+        _ => Err(Error::NotSupported),
+    }
+}
+
+const fn decode_csinc(sf: bool, rm: u32, cond: Condition, rn: u32, rd: u32) -> Result<Inst> {
+    Ok(Inst::Csinc {
+        rd: rd as u8,
+        rn: rn as u8,
+        rm: rm as u8,
+        cond,
+        sf,
+    })
 }
 
 const fn decode_adc(sf: bool, rm: u32, rn: u32, rd: u32) -> Result<Inst> {
