@@ -126,7 +126,7 @@ impl Optimizer {
                         rd,
                         imm: imm as i64,
                     },
-                    amount: 4,
+                    amount: 2,
                 });
             }
             _ => return,

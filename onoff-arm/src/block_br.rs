@@ -39,21 +39,16 @@ impl BranchAnalyzer {
             match inst {
                 SelectInst::Raw(inst) => {
                     match inst {
-                        Inst::B { label } | Inst::Bl { label } => {
+                        Inst::B { label } => {
                             let b = n.checked_add(label).unwrap();
                             self.perform_link(insts, b);
 
                             break;
                         }
-                        Inst::Tbz { offset, .. } | Inst::Tbnz { offset, .. } => {
-                            self.perform_link(insts, n + 4);
-                            let b = n.checked_add(offset).unwrap();
-                            self.perform_link(insts, b);
-
-                            break;
-                        }
+                        Inst::Tbz { .. } | Inst::Tbnz { .. } |
                         Inst::Br { .. }
                         | Inst::Blr { .. }
+                        | Inst::Bl { .. } // this may be a function call, so we skip.
                         | Inst::Ret { .. }
                         | Inst::Udf { .. }
                         | Inst::Svc { .. } => break,
