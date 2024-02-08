@@ -33,24 +33,24 @@ pub enum Inst {
     },
     /// `STRB <Rt>, [<Rn|SP>], #<simm>`
     Strb {
-        rt: u8,
-        rn: u8,
+        rt: Register,
+        rn: Register,
         offset: i64,
         wback: bool,
         postindex: bool,
     },
     /// `STRH <Rt>, [<Rn|SP>], #<simm>`
     Strh {
-        rt: u8,
-        rn: u8,
+        rt: Register,
+        rn: Register,
         offset: i64,
         wback: bool,
         postindex: bool,
     },
     /// `STR <Rt>, [<Rn|SP>], #<simm>`
     Str {
-        rt: u8,
-        rn: u8,
+        rt: Register,
+        rn: Register,
         offset: i64,
         wback: bool,
         postindex: bool,
@@ -122,20 +122,78 @@ pub enum Inst {
     Sbc { rd: u8, rn: u8, rm: u8, sf: bool },
     /// `SBCS <Rd>, <Rn>, <Rm>`
     Sbcs { rd: u8, rn: u8, rm: u8, sf: bool },
+    /// `MOVN <Rd>, #<imm>{, LSL #<shift>}`
+    Movn {
+        rd: Register,
+        imm: u16,
+        shift: u8,
+        sf: bool,
+    },
+    /// `MOVZ <Rd>, #<imm>{, LSL #<shift>}`
     Movz {
-        rd: u8,
+        rd: Register,
+        imm: u16,
+        shift: u8,
+        sf: bool,
+    },
+    /// `MOVK <Rd>, #<imm>{, LSL #<shift>}`
+    Movk {
+        rd: Register,
         imm: u16,
         shift: u8,
         sf: bool,
     },
     /// `CSINC <Rd>, <Rn>, <Rm>, <cond>`
     Csinc {
-        rd: u8,
-        rn: u8,
-        rm: u8,
+        rd: Register,
+        rn: Register,
+        rm: Register,
         cond: Condition,
         sf: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Register {
+    /// General Purpose Register
+    General(u8),
+    /// Stack Pointer
+    Sp,
+    /// Zero Register
+    Zr,
+}
+
+impl Register {
+    pub const fn index(self) -> u8 {
+        use Register::*;
+
+        match self {
+            General(i) => i,
+            Sp | Zr => 31,
+        }
+    }
+
+    #[inline]
+    pub const fn new_with_sp(index: u8) -> Self {
+        assert!(index < 32);
+        use Register::*;
+
+        match index {
+            31 => Sp,
+            or => General(or),
+        }
+    }
+
+    #[inline]
+    pub const fn new_with_zr(index: u8) -> Self {
+        assert!(index < 32);
+        use Register::*;
+
+        match index {
+            31 => Zr,
+            or => General(or),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -411,11 +469,13 @@ const fn decode_movw_imm(inst: u32) -> Result<Inst> {
 
     let sf = sf == 1;
     let shift = (hw << 4) as u8;
-    let rd = rd as u8;
+    let rd = Register::new_with_zr(rd as u8);
     let imm = imm16 as u16;
 
     Ok(match opc {
+        0b00 => Inst::Movn { rd, imm, shift, sf },
         0b10 => Inst::Movz { rd, imm, shift, sf },
+        0b11 => Inst::Movk { rd, imm, shift, sf },
         _ => todo!(),
     })
 }
@@ -587,8 +647,8 @@ const fn decode_str_group(
     postindex: bool,
     size: u32,
 ) -> Result<Inst> {
-    let rt = rt as u8;
-    let rn = rn as u8;
+    let rt = Register::new_with_zr(rt as u8);
+    let rn = Register::new_with_sp(rn as u8);
     let offset = if wback {
         sign_extend_64::<9>(imm)
     } else {
@@ -845,9 +905,9 @@ const fn decode_cselect(inst: u32) -> Result<Inst> {
 
 const fn decode_csinc(sf: bool, rm: u32, cond: Condition, rn: u32, rd: u32) -> Result<Inst> {
     Ok(Inst::Csinc {
-        rd: rd as u8,
-        rn: rn as u8,
-        rm: rm as u8,
+        rd: Register::new_with_zr(rd as u8),
+        rn: Register::new_with_zr(rn as u8),
+        rm: Register::new_with_zr(rm as u8),
         cond,
         sf,
     })
@@ -981,7 +1041,13 @@ mod tests {
     fn decode() {
         let inst = [
             0x7e, 0x05, 0x00, 0x14, 0x46, 0x14, 0x00, 0xf0, 0xc0, 0x03, 0x5f, 0xd6, 0xff, 0x83,
-            0x01, 0xd1,
+            0x01, 0xd1, 0x08, 0x00, 0x00, 0xb0, 0xff, 0x43, 0x00, 0xd1, 0xff, 0x0f, 0x00, 0xb9,
+            0x28, 0x00, 0x80, 0x52, 0xe8, 0x0b, 0x00, 0xb9, 0xff, 0x07, 0x00, 0xb9, 0x01, 0x00,
+            0x00, 0x14, 0xe8, 0x07, 0x40, 0xb9, 0x08, 0x29, 0x00, 0x71, 0xe8, 0xb7, 0x9f, 0x1a,
+            0x68, 0x01, 0x00, 0x37, 0x01, 0x00, 0x00, 0x14, 0xe9, 0x0b, 0x40, 0xb9, 0xe8, 0x0b,
+            0x40, 0xb9, 0x08, 0x01, 0x09, 0x0b, 0xe8, 0x0b, 0x00, 0xb9, 0x01, 0x00, 0x00, 0x14,
+            0xe8, 0x07, 0x40, 0xb9, 0x08, 0x05, 0x00, 0x11, 0xe8, 0x07, 0x00, 0xb9, 0xf3, 0xff,
+            0xff, 0x17, 0xe0, 0x0b, 0x40, 0xb9, 0xff, 0x43, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6,
         ];
 
         let mut decoder = InstDecoder::new(inst.as_slice());

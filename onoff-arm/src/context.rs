@@ -1,16 +1,15 @@
 use crate::inst::{Inst, InstDecoder};
-use crate::mem::{Memory, PageMemory};
+use crate::optimizer::Optimizer;
+use crate::prepass;
 use crate::translate::{BlockAbi, ExecutionReturn, InterruptType, Translator};
 use lru::LruCache;
 use onoff_core::error::{Error, Result};
-use smallvec::SmallVec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Debug, Formatter};
-use std::num::{NonZeroU16, NonZeroUsize};
+use std::num::NonZeroUsize;
 
 pub struct Cpu {
     context: CpuContext,
-    memory: PageMemory,
     translator: Translator,
     code_cache: BTreeMap<u64, BlockAbi>,
 
@@ -22,17 +21,42 @@ impl Cpu {
     pub fn new() -> Self {
         Self {
             context: CpuContext::new(),
-            memory: PageMemory::new(),
             translator: Translator::new().unwrap(),
             code_cache: BTreeMap::new(),
             lru: LruCache::new(NonZeroUsize::new(512).unwrap()),
         }
     }
 
-    /// S: Steps
-    pub fn execute<const S: usize>(&mut self) -> Result<CpuStatus> {
-        assert!(S <= 64, "too many steps!");
+    pub unsafe fn execute_inf(&mut self) -> Result<CpuStatus> {
+        let pc = self.context.pc();
 
+        if let Some(&block) = self.lru.get(&pc) {
+            let status = unsafe { block(&mut self.context) };
+
+            return Ok(CpuStatus::from_u32(status));
+        }
+
+        if let Some(&block) = self.code_cache.get(&pc) {
+            let status = unsafe { block(&mut self.context) };
+
+            return Ok(CpuStatus::from_u32(status));
+        }
+
+        let insts = prepass::prepass(pc as _);
+
+        let block = self.translator.translate(&insts);
+
+        let status = block(&mut self.context);
+
+        if let Some((k, v)) = self.lru.push(pc, block) {
+            self.code_cache.insert(k, v);
+        }
+
+        Ok(CpuStatus::from_u32(status))
+    }
+
+    /// S: Steps
+    pub unsafe fn execute<const S: usize>(&mut self) -> Result<CpuStatus> {
         let pc = self.context.pc();
 
         if let Some(&block) = self.lru.get(&pc) {
@@ -48,11 +72,10 @@ impl Cpu {
         }
 
         // no compiled code found, let's compile.
-        let mut v = SmallVec::<Inst, S>::new();
-        for i in 0..S as u64 {
-            let Ok(mem) = self.memory.read32(pc + i * 4) else {
-                break;
-            };
+        let mut optmizer = Optimizer::new();
+        for i in 0..S {
+            let addr = (pc as *const u32).add(i);
+            let mem = unsafe { *addr };
 
             let mem = mem.to_le_bytes();
 
@@ -65,10 +88,14 @@ impl Cpu {
                 break;
             };
 
-            v.push(inst);
+            optmizer.perform(inst);
         }
 
-        let block = self.translator.translate(&v);
+        let v = optmizer.finalize();
+
+        let mut map = HashMap::new();
+        map.insert(0, v.into());
+        let block = self.translator.translate(&map);
 
         let status = unsafe { block(&mut self.context) };
 
@@ -77,11 +104,6 @@ impl Cpu {
         }
 
         Ok(CpuStatus::from_u32(status))
-    }
-
-    #[inline]
-    pub fn memory_mut(&mut self) -> &mut PageMemory {
-        &mut self.memory
     }
 
     #[inline]
@@ -136,7 +158,7 @@ pub struct CpuContext {
     pub pc: u64,
 
     // process state
-    pub pstate: u8,
+    pub pstate: [u8; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,7 +215,7 @@ impl CpuContext {
         Self {
             gprs: [0; 32],
             pc: 0,
-            pstate: 0,
+            pstate: [0; 4],
         }
     }
 
@@ -242,40 +264,40 @@ mod tests {
     fn execute() {
         // Adr { rd: 0, label: 12 }
         // B { label: 4 }
-        let inst = [0x60, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x14];
+        let inst = [0x60u8, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x14];
 
         let mut cpu = Cpu::new();
+        cpu.set_debug(true);
 
-        cpu.memory_mut().write_exact(&inst, 0x10000).unwrap();
-
-        cpu.set_pc(0x10000);
-        let status = cpu.execute::<2>().unwrap();
-
-        dbg!(status);
-
-        println!("{:?}", cpu);
-
-        assert_eq!(cpu.context().gprs[0], 0x10000 + 12);
-        assert_eq!(cpu.context().pc(), 0x10000 + 4 + 4);
-
-        cpu.set_pc(0x10000);
-        let status = cpu.execute::<2>().unwrap();
+        let pc = inst.as_ptr() as u64;
+        cpu.set_pc(pc);
+        let status = unsafe { cpu.execute::<2>().unwrap() };
 
         dbg!(status);
 
         println!("{:?}", cpu);
 
-        assert_eq!(cpu.context().gprs[0], 0x10000 + 12);
-        assert_eq!(cpu.context().pc(), 0x10000 + 4 + 4);
+        assert_eq!(cpu.context().gprs[0], pc + 12);
+        assert_eq!(cpu.context().pc(), pc + 4 + 4);
+
+        cpu.set_pc(pc);
+        let status = unsafe { cpu.execute::<2>().unwrap() };
+
+        dbg!(status);
+
+        println!("{:?}", cpu);
+
+        assert_eq!(cpu.context().gprs[0], pc + 12);
+        assert_eq!(cpu.context().pc(), pc + 4 + 4);
     }
 
     #[test]
-    fn test_out() {
+    fn test_control_flow() {
         // int main() {
         //  int ab = 1;
         //
         //  for (int i = 0; i < 10; i++) {
-        //       ab += ab;
+        //       ab += 1;
         //  }
         //
         //  return ab;
@@ -284,28 +306,27 @@ mod tests {
         const STACK_SIZE: usize = 64;
         let mut stack = Box::new([1u8; STACK_SIZE]);
         let mem = [
-            0xff, 0x43, 0x00, 0xd1, 0xff, 0x0f, 0x00, 0xb9, 0x28, 0x00, 0x80, 0x52, 0xe8, 0x0b,
+            0xffu8, 0x43, 0x00, 0xd1, 0xff, 0x0f, 0x00, 0xb9, 0x28, 0x00, 0x80, 0x52, 0xe8, 0x0b,
             0x00, 0xb9, 0xff, 0x07, 0x00, 0xb9, 0x01, 0x00, 0x00, 0x14, 0xe8, 0x07, 0x40, 0xb9,
             0x08, 0x29, 0x00, 0x71, 0xe8, 0xb7, 0x9f, 0x1a, 0x68, 0x01, 0x00, 0x37, 0x01, 0x00,
             0x00, 0x14, 0xe9, 0x0b, 0x40, 0xb9, 0xe8, 0x0b, 0x40, 0xb9, 0x08, 0x01, 0x09, 0x0b,
             0xe8, 0x0b, 0x00, 0xb9, 0x01, 0x00, 0x00, 0x14, 0xe8, 0x07, 0x40, 0xb9, 0x08, 0x05,
             0x00, 0x11, 0xe8, 0x07, 0x00, 0xb9, 0xf3, 0xff, 0xff, 0x17, 0xe0, 0x0b, 0x40, 0xb9,
-            0xff, 0x43, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00,
-            0x00, 0x00,
+            0xff, 0x43, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6,
         ];
 
         let mut cpu = Cpu::new();
 
         cpu.set_debug(true);
-        cpu.memory_mut().write_exact(&mem, 0x10000).unwrap();
 
-        cpu.set_pc(0x10000);
+        let pc = mem.as_ptr() as u64;
+        cpu.set_pc(pc);
         cpu.set_sp(unsafe { stack.as_mut_ptr().byte_add(STACK_SIZE) as u64 });
 
         *cpu.context.lr_mut() = 114514;
 
         loop {
-            let _ = cpu.execute::<16>().unwrap();
+            let _ = unsafe { cpu.execute::<16>().unwrap() };
 
             // returned
             if cpu.pc() == 114514 {
